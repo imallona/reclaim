@@ -471,6 +471,15 @@ if _pipeline_type == 'sc' and config.get('report'):
         _render_report_inputs = (
             _render_report_inputs + [_starsolo_log_summary_tsv]
         )
+    if config.get('per_cell_mismatch', False):
+        _per_cell_mismatch_cells = op.abspath(op.join(
+            workflow.basedir,
+            config['report'].get('cells_to_perturbation', '')
+        ))
+        include: "modules/per_cell_mismatch.snmk"
+        _render_report_inputs = (
+            _render_report_inputs + [_per_cell_mismatch_tsv]
+        )
     include: "modules/render_report.snmk"
 
 

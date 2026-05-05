@@ -16,6 +16,7 @@ params:
   feature_sets: "genes genic_repeats intergenic_repeats"
   starsolo_modes: "unique multi"
   starsolo_log_summary: ""
+  per_cell_mismatch: ""
 ---
 
 ```{r setup, include = FALSE}
@@ -228,5 +229,73 @@ if (nzchar(log_path) && file.exists(log_path)) {
           caption = "STAR log metric summary across libraries (mean +/- sd)")
 } else {
   cat("starsolo_log_summary TSV not provided or not found:", log_path, "\n")
+}
+```
+
+## Per-cell mismatch rate by perturbation
+
+Per-cell `NM/aligned_bases` from each library's BAM, joined to the perturbation table by `(gem_group, cell_barcode)`. Each guide pair (`sgID_AB`) targeting the same gene gives one summary point, so genes with multiple guide pairs show the within-gene spread.
+
+```{r per-cell-mismatch, fig.width = 11, fig.height = 7}
+mm_path <- params$per_cell_mismatch
+if (nzchar(mm_path) && file.exists(mm_path)) {
+  mm <- read_tsv(mm_path, show_col_types = FALSE)
+  cells_full <- read_tsv(cells_path, show_col_types = FALSE) %>%
+    mutate(cb_short = sub("-[0-9]+$", "", cell_barcode))
+
+  joined <- mm %>%
+    inner_join(cells_full,
+               by = c("gem_group" = "gem_group",
+                      "cell_barcode" = "cb_short"))
+  saveRDS(joined, file.path(params$report_outdir, "per_cell_mismatch.rds"))
+
+  ntc_baseline <- joined %>%
+    filter(gene == "non-targeting") %>%
+    summarise(median_rate = median(mismatch_rate, na.rm = TRUE)) %>%
+    pull(median_rate)
+
+  per_guide <- joined %>%
+    group_by(gene, sgID_AB) %>%
+    summarise(n_cells = dplyr::n(),
+              median_rate = median(mismatch_rate, na.rm = TRUE),
+              q25 = quantile(mismatch_rate, 0.25, na.rm = TRUE),
+              q75 = quantile(mismatch_rate, 0.75, na.rm = TRUE),
+              .groups = "drop") %>%
+    filter(n_cells >= 5)
+
+  per_gene <- per_guide %>%
+    group_by(gene) %>%
+    summarise(n_guides = dplyr::n(),
+              gene_median = median(median_rate),
+              gene_min = min(median_rate),
+              gene_max = max(median_rate),
+              .groups = "drop")
+
+  multi_guide_genes <- per_gene %>% filter(n_guides >= 2) %>% pull(gene)
+
+  print(ggplot(per_guide %>% filter(gene %in% multi_guide_genes |
+                                    gene == "non-targeting"),
+               aes(x = reorder(gene, median_rate, FUN = median),
+                   y = median_rate)) +
+    geom_hline(yintercept = ntc_baseline,
+               linetype = "dashed", colour = "grey40") +
+    geom_point(aes(size = n_cells, colour = gene == "non-targeting"),
+               alpha = 0.75) +
+    scale_colour_manual(values = c(`TRUE` = "grey40", `FALSE` = "steelblue"),
+                        guide = "none") +
+    coord_flip() +
+    labs(x = NULL, y = "median per-cell mismatch rate (NM / aligned bases)",
+         title = "Mismatch rate by perturbation",
+         subtitle = sprintf("one point per guide pair; dashed = non-targeting median (%.4f)",
+                            ntc_baseline)) +
+    theme_minimal(base_size = 10))
+
+  per_gene %>%
+    arrange(desc(gene_median)) %>%
+    head(25) %>%
+    kable(digits = 5,
+          caption = "Top 25 genes by median per-guide mismatch rate")
+} else {
+  cat("per_cell_mismatch TSV not provided or not found:", mm_path, "\n")
 }
 ```

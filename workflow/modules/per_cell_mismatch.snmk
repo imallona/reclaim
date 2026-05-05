@@ -1,0 +1,72 @@
+#!/usr/bin/env snakemake -s
+"""
+Per-cell mismatch rates from each library's BAM, aggregated to one TSV.
+
+The join to perturbations happens in the report. The caller must set
+_per_cell_mismatch_cells (cells_to_perturbation.tsv path) before include.
+"""
+
+import os.path as op
+import re
+
+
+_per_cell_mismatch_script = op.join(
+    workflow.basedir, 'scripts', 'per_cell_mismatch.py'
+)
+_per_cell_mismatch_dir = op.join(config['base'], 'qc', 'per_cell_mismatch')
+_per_cell_mismatch_tsv = op.join(
+    config['base'], 'qc', 'per_cell_mismatch.tsv'
+)
+
+
+def _gem_group_from_sample_id(sid):
+    m = re.match(r'^KD6_(\d+)_essential$', sid)
+    if not m:
+        raise ValueError(f'cannot derive gem_group from sample_id {sid}')
+    return int(m.group(1))
+
+
+rule per_library_mismatch:
+    input:
+        bam = op.join(config['base'], 'starsolo', '{sample_id}',
+                      'unique_genes', 'Aligned.sortedByCoord.out.bam'),
+        cells = _per_cell_mismatch_cells,
+        script = _per_cell_mismatch_script,
+    output:
+        tsv = op.join(_per_cell_mismatch_dir, '{sample_id}.tsv'),
+    params:
+        outdir = _per_cell_mismatch_dir,
+        gem_group = lambda wc: _gem_group_from_sample_id(wc.sample_id),
+    log:
+        op.join(config['base'], 'logs',
+                'per_cell_mismatch_{sample_id}.log'),
+    shell:
+        """
+        mkdir -p {params.outdir}
+        python {input.script} \
+            --bam {input.bam} \
+            --cells {input.cells} \
+            --sample-id {wildcards.sample_id} \
+            --gem-group {params.gem_group} \
+            --out {output.tsv} 2> {log}
+        """
+
+
+rule aggregate_per_cell_mismatch:
+    input:
+        per_lib = expand(op.join(_per_cell_mismatch_dir, '{sample_id}.tsv'),
+                         sample_id=_sc_sample_ids),
+    output:
+        tsv = _per_cell_mismatch_tsv,
+    params:
+        outdir = op.dirname(_per_cell_mismatch_tsv),
+    log:
+        op.join(config['base'], 'logs', 'aggregate_per_cell_mismatch.log'),
+    shell:
+        """
+        mkdir -p {params.outdir}
+        head -n 1 {input.per_lib[0]} > {output.tsv}
+        for f in {input.per_lib}; do
+            tail -n +2 "$f" >> {output.tsv}
+        done 2> {log}
+        """
