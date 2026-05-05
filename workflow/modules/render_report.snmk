@@ -46,6 +46,9 @@ _known_params = {
         config.get('aligner_params', {}).get('starsolo', {})
               .get('multimapper_modes', ['unique'])
     ),
+    'starsolo_log_summary': op.abspath(op.join(
+        config['base'], 'qc', 'starsolo_log_summary.tsv'
+    )),
 }
 
 _requested_keys = _report_cfg.get('params', list(_known_params.keys()))

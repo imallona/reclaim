@@ -142,7 +142,7 @@ ggplot(deg, aes(x = mutation_rate, y = value,
 
 Summary view focusing on the two most interpretable metrics.
 
-```{r overview-two-metrics, fig.height=6, fig.width=8}
+```{r overview-two-metrics, fig.height=6, fig.width=14}
 ov <- global %>%
   filter(!is.na(mutation_rate)) %>%
   select(aligner_mode, feature_set, gran_label, mutation_rate, pearson_r, f1) %>%
@@ -158,18 +158,17 @@ logit_clip <- scales::trans_new(
   format    = function(b) format(b, drop0trailing = TRUE))
 
 ggplot(ov, aes(x = mutation_rate, y = value,
-               colour = aligner_mode, linetype = gran_label,
-               group = interaction(aligner_mode, gran_label))) +
+               colour = aligner_mode,
+               group = aligner_mode)) +
   geom_line(linewidth = 0.7, alpha = 0.9) +
   geom_point(size = 2.2, alpha = 0.95) +
-  facet_grid(metric ~ feature_set, scales = "free_y") +
+  facet_grid(metric ~ feature_set + gran_label, scales = "free_y") +
   scale_colour_aligner_mode() +
-  scale_linetype_granularity() +
   scale_x_continuous(labels = percent_format(accuracy = 0.1)) +
   scale_y_continuous(trans = logit_clip) +
   labs(x = "mutation rate", y = NULL,
        title = "Pearson r and F1 across noise levels",
-       subtitle = "colour = aligner_mode; linetype = granularity; y on logit scale") +
+       subtitle = "colour = aligner_mode; columns = feature_set x granularity; y on logit scale") +
   theme_ng() +
   theme(legend.position = "bottom", legend.box = "vertical")
 ```

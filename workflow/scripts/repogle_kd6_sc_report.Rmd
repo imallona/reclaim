@@ -15,6 +15,7 @@ params:
   report_outdir: "."
   feature_sets: "genes genic_repeats intergenic_repeats"
   starsolo_modes: "unique multi"
+  starsolo_log_summary: ""
 ---
 
 ```{r setup, include = FALSE}
@@ -25,6 +26,7 @@ suppressPackageStartupMessages({
   library(dplyr)
   library(tidyr)
   library(knitr)
+  library(ggplot2)
 })
 
 starsolo_base <- params$starsolo_base
@@ -160,4 +162,71 @@ for (mode in starsolo_modes) {
 }
 unions <- bind_rows(union_rows)
 kable(unions)
+```
+
+## STAR log variability
+
+Mismatch and indel rates per library, parsed from `Log.final.out`. Differences between libraries can point to sequencing or library quality differences.
+
+```{r starsolo-log-variability, fig.width = 10, fig.height = 6}
+log_path <- params$starsolo_log_summary
+if (nzchar(log_path) && file.exists(log_path)) {
+  star_log <- read_tsv(log_path, show_col_types = FALSE)
+  saveRDS(star_log, file.path(params$report_outdir, "starsolo_log_summary.rds"))
+
+  numeric_cols <- c("mismatch_rate_pct", "deletion_rate_pct",
+                    "insertion_rate_pct", "uniquely_mapped_pct",
+                    "multi_mapped_pct", "too_many_loci_pct",
+                    "unmapped_too_short_pct", "unmapped_other_pct")
+  star_log <- star_log %>%
+    mutate(across(any_of(numeric_cols),
+                  ~ suppressWarnings(as.numeric(.))))
+
+  rate_long <- star_log %>%
+    select(sample_id, multimapper_mode, feature_set,
+           mismatch_rate_pct, deletion_rate_pct, insertion_rate_pct) %>%
+    pivot_longer(c(mismatch_rate_pct, deletion_rate_pct, insertion_rate_pct),
+                 names_to = "metric", values_to = "pct") %>%
+    filter(!is.na(pct))
+
+  print(ggplot(rate_long, aes(x = sample_id, y = pct, colour = feature_set,
+                              shape = multimapper_mode)) +
+    geom_point(size = 2.2, alpha = 0.85) +
+    facet_wrap(~ metric, scales = "free_y", ncol = 1) +
+    labs(x = NULL, y = "rate (%)",
+         title = "Per-library STAR mismatch and indel rates",
+         subtitle = "one point per (library, mode, feature_set)") +
+    theme_minimal(base_size = 11) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+          legend.position = "bottom"))
+
+  map_long <- star_log %>%
+    select(sample_id, multimapper_mode, feature_set,
+           uniquely_mapped_pct, multi_mapped_pct,
+           too_many_loci_pct, unmapped_too_short_pct, unmapped_other_pct) %>%
+    pivot_longer(-c(sample_id, multimapper_mode, feature_set),
+                 names_to = "fate", values_to = "pct") %>%
+    filter(!is.na(pct))
+
+  print(ggplot(map_long, aes(x = sample_id, y = pct, fill = fate)) +
+    geom_col(position = "stack") +
+    facet_grid(multimapper_mode ~ feature_set) +
+    labs(x = NULL, y = "% reads",
+         title = "Per-library STAR read-fate breakdown") +
+    theme_minimal(base_size = 11) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+          legend.position = "bottom"))
+
+  star_log %>%
+    group_by(multimapper_mode, feature_set) %>%
+    summarise(across(any_of(numeric_cols),
+                     list(mean = ~ mean(., na.rm = TRUE),
+                          sd   = ~ sd(., na.rm = TRUE)),
+                     .names = "{.col}_{.fn}"),
+              .groups = "drop") %>%
+    kable(digits = 3,
+          caption = "STAR log metric summary across libraries (mean +/- sd)")
+} else {
+  cat("starsolo_log_summary TSV not provided or not found:", log_path, "\n")
+}
 ```
