@@ -460,7 +460,7 @@ if _pipeline_type == 'bulk' and config.get('report'):
 
 if _pipeline_type == 'sc' and config.get('report'):
     _render_report_inputs = (
-        starsolo_bams() + kallisto_counts()
+        starsolo_bams() + starsolo_tagcount_outputs() + kallisto_counts()
         + ([_metadata_txt] if _metadata_url else [])
         + [op.join(config['indices_base'], 'indices', genome_tag,
                    'repeat_biology_annotation.tsv')]

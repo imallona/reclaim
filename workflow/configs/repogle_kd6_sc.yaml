@@ -93,6 +93,8 @@ report:
   cells_to_perturbation: "../results/paper/repogle_2022/data/cells_to_perturbation.tsv"
   params:
     - starsolo_base
+    - starsolo_tagcount_base
+    - sc_count_mode
     - indices_base
     - cells_to_perturbation
     - report_outdir

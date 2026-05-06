@@ -10,6 +10,8 @@ output:
     code_folding: hide
 params:
   starsolo_base: "."
+  starsolo_tagcount_base: "."
+  sc_count_mode: ""
   cells_to_perturbation: "."
   indices_base: "."
   report_outdir: "."
@@ -31,6 +33,8 @@ suppressPackageStartupMessages({
 })
 
 starsolo_base <- params$starsolo_base
+starsolo_tagcount_base <- params$starsolo_tagcount_base
+sc_count_mode <- params$sc_count_mode
 cells_path <- params$cells_to_perturbation
 feature_sets <- strsplit(params$feature_sets, " ")[[1]]
 starsolo_modes <- strsplit(params$starsolo_modes, " ")[[1]]
@@ -60,13 +64,22 @@ cat("Distinct gemgroups:              ", n_gemgroups, "\n")
 For each library and each (multimapper_mode, feature_set), counts cells with at least one UMI, total UMIs, and features with at least one UMI.
 
 ```{r per-lib-summary}
+# In tagcount mode the canonical (genes) matrix lives under starsolo_base
+# and is only produced for unique multimapper_mode; repeat feature_sets are
+# emitted by sc_count_features.py under starsolo_tagcount_base for every
+# multimapper_mode. In per_featureset mode every (mode, fs) is under
+# starsolo_base. Returns NULL when matrix.mtx is absent so callers skip
+# combos that were never produced (e.g. multi_genes in tagcount).
 read_starsolo <- function(library_id, mode, fs) {
-  mtx_dir <- file.path(starsolo_base, library_id,
+  base <- if (sc_count_mode == "tagcount" && fs != "genes")
+            starsolo_tagcount_base else starsolo_base
+  mtx_dir <- file.path(base, library_id,
                        paste0(mode, "_", fs), "Solo.out", "Gene", "raw")
-  if (!dir.exists(mtx_dir)) return(NULL)
-  m <- readMM(file.path(mtx_dir, "matrix.mtx"))
+  mtx_file <- file.path(mtx_dir, "matrix.mtx")
+  if (!file.exists(mtx_file)) return(NULL)
+  m <- readMM(mtx_file)
   barcodes <- readLines(file.path(mtx_dir, "barcodes.tsv"))
-  list(matrix = m, barcodes = barcodes)
+  list(matrix = m, barcodes = barcodes, mtx_dir = mtx_dir)
 }
 
 libraries <- sort(unique(paste0("KD6_", cells$gem_group, "_essential")))
@@ -148,9 +161,7 @@ for (mode in starsolo_modes) {
     for (lib in libraries) {
       r <- read_starsolo(lib, mode, fs)
       if (is.null(r)) next
-      mtx_dir <- file.path(starsolo_base, lib,
-                            paste0(mode, "_", fs), "Solo.out", "Gene", "raw")
-      features <- readLines(file.path(mtx_dir, "features.tsv"))
+      features <- readLines(file.path(r$mtx_dir, "features.tsv"))
       features <- sapply(strsplit(features, "\t"), `[`, 1)
       detected <- union(detected,
                          features[rowSums(r$matrix) > 0])
