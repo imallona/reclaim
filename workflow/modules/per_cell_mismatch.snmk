@@ -27,6 +27,8 @@ def _gem_group_from_sample_id(sid):
 
 
 rule per_library_mismatch:
+    conda:
+        op.join(workflow.basedir, 'envs', 'sc_count.yaml')
     input:
         bam = op.join(config['base'], 'starsolo', '{sample_id}',
                       'unique_genes', 'Aligned.sortedByCoord.out.bam'),
