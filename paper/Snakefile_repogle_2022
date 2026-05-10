@@ -245,6 +245,9 @@ rule render_repogle_2022_perturbseq_report:
         perturbations = op.abspath(op.join(_data, "selected_perturbations.tsv")),
         alignment_qc = op.abspath(op.join(_report, "alignment_qc_per_library.tsv")),
         starsolo_base = op.abspath(config['phase3']['starsolo_base']),
+        starsolo_tagcount_base = (
+            op.abspath(config['phase3']['starsolo_tagcount_base'])
+            if 'starsolo_tagcount_base' in config.get('phase3', {}) else ""),
         indices_base = op.abspath(config['phase3']['indices_base']),
         feature_sets = config['phase3']['feature_sets'],
         starsolo_modes = config['phase3']['starsolo_modes'],
@@ -267,6 +270,7 @@ rule render_repogle_2022_perturbseq_report:
                 selected_perturbations = '{params.perturbations}',
                 alignment_qc = '{params.alignment_qc}',
                 starsolo_base = '{params.starsolo_base}',
+                starsolo_tagcount_base = '{params.starsolo_tagcount_base}',
                 indices_base = '{params.indices_base}',
                 report_outdir = '{params.outdir}',
                 feature_sets = '{params.feature_sets}',

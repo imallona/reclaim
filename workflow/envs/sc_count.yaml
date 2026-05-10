@@ -1,0 +1,8 @@
+name: repeats_sc_count
+channels:
+  - bioconda
+  - conda-forge
+dependencies:
+  - python=3.11
+  - bioconda::pysam=0.22
+  - conda-forge::intervaltree

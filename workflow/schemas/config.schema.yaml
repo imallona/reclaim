@@ -22,6 +22,14 @@ properties:
     type: string
     enum: [simulation, bulk, sc, noise_report, de_simulation]
 
+  sc_count_mode:
+    type: string
+    enum: [per_featureset, tagcount]
+    default: per_featureset
+    description: >-
+      sc-only switch between native STARsolo per-feature_set counting
+      (default) and one-STAR-alignment-plus-pysam-tagcount.
+
   reference:
     type: object
     required: [genome_fasta, repeats_gtf]
@@ -168,7 +176,7 @@ properties:
     minItems: 1
     items:
       type: string
-      enum: [starsolo, kallisto, alevin, bowtie2, star, salmon]
+      enum: [starsolo, starsolo_tagcount, kallisto, alevin, bowtie2, star, salmon]
 
   aligner_params:
     type: object
@@ -186,6 +194,20 @@ properties:
           extra_args:
             type: string
             default: ""
+          sc_count:
+            type: object
+            additionalProperties: false
+            properties:
+              umi_dedup:
+                type: string
+                enum: [exact, 1mm_all]
+                default: 1mm_all
+              canonical_feature_set:
+                type: string
+              threads_per_recount:
+                type: integer
+                minimum: 1
+                default: 8
       star:
         type: object
         additionalProperties: false
@@ -197,6 +219,11 @@ properties:
         type: object
         additionalProperties: false
         properties:
+          multimapper_modes:
+            type: array
+            items:
+              type: string
+              enum: [unique, em]
           extra_args:
             type: string
             default: ""
@@ -204,6 +231,11 @@ properties:
         type: object
         additionalProperties: false
         properties:
+          multimapper_modes:
+            type: array
+            items:
+              type: string
+              enum: [unique, noem]
           extra_args:
             type: string
             default: ""
@@ -251,6 +283,10 @@ properties:
         type: integer
         minimum: 1000
         description: per-rule mem_mb budget for render_report, defaults to max_mem_mb
+      starsolo_threads:
+        type: integer
+        minimum: 1
+        description: thread cap for STARsolo alignment rules; defaults to min(workflow.cores, 14)
 
   report:
     type: object

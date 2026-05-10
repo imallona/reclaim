@@ -76,3 +76,44 @@ save_ng <- function(plot, file, width_mm = 85, height_mm = 60) {
          width = width_mm, height = height_mm, units = "mm")
   invisible(plot)
 }
+
+## Centralised aligner_mode -> colour and granularity -> linetype dictionaries.
+## Pairs of modes for the same aligner share a hue family (RColorBrewer
+## "Paired"), so the eye groups by aligner first; the second mode gets the
+## darker shade.
+aligner_mode_palette <- c(
+  "alevin (noem)"     = "#A6CEE3",
+  "alevin (unique)"   = "#1F78B4",
+  "bowtie2 (multi)"   = "#B2DF8A",
+  "bowtie2 (unique)"  = "#33A02C",
+  "kallisto (em)"     = "#FB9A99",
+  "kallisto (unique)" = "#E31A1C",
+  "starsolo (multi)"  = "#FDBF6F",
+  "starsolo (unique)" = "#FF7F00",
+  # starsolo_tagcount is the recount path: same STARsolo alignment, different
+  # counter. Given its own paired hue (purple) so plots can show it next to
+  # starsolo as a distinct method.
+  "starsolo_tagcount (multi)"  = "#CAB2D6",
+  "starsolo_tagcount (unique)" = "#6A3D9A"
+)
+
+granularity_linetypes <- c(
+  locus     = "solid",
+  gene_id   = "longdash",
+  family_id = "dotted",
+  class_id  = "twodash"
+)
+
+scale_colour_aligner_mode <- function(name = "aligner (mode)", ...) {
+  ggplot2::scale_colour_manual(values = aligner_mode_palette,
+                               name = name, na.value = "grey50", ...)
+}
+
+scale_fill_aligner_mode <- function(name = "aligner (mode)", ...) {
+  ggplot2::scale_fill_manual(values = aligner_mode_palette,
+                             name = name, na.value = "grey50", ...)
+}
+
+scale_linetype_granularity <- function(name = "granularity", ...) {
+  ggplot2::scale_linetype_manual(values = granularity_linetypes, name = name, ...)
+}

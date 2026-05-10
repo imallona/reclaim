@@ -1,0 +1,126 @@
+#!/usr/bin/env snakemake -s
+"""
+smartseq2_tagcount: re-count a STARsolo-tagged SmartSeq2 BAM via
+sc_count_features.py. Mirror of starsolo_tagcount.snmk for the SmartSeq2
+technology, with two SmartSeq2-specific differences:
+
+1. UMI handling. SmartSeq2 has no real UMIs. The script is invoked with
+   --umi-dedup none, which keys each (cb, gid) bucket by a per-record
+   synthetic UB (qname, ref_start) so every BAM record contributes its
+   weight without any UMI-collapse. Paired-end BAMs are handled by
+   skipping is_read2 records inside sc_count_features.py so a fragment
+   is not double-counted across its two ends. No duplicate removal is
+   attempted: without a UMI the pipeline cannot distinguish technical
+   PCR duplicates from biologically real reads at the same coordinates.
+
+2. Whitelist source. STARsolo SmartSeq2 runs with --soloCellFilter None and
+   does not produce a filtered/barcodes.tsv. The cell list is the manifest
+   cell column, which STARsolo writes to Solo.out/Gene/raw/barcodes.tsv.
+   That file is used as the tagcount whitelist directly.
+
+The rule consumes the canonical genes-feature-set alignment as its BAM
+source so a single SmartSeq2 alignment per library serves all repeat
+feature_sets. STARsolo SmartSeq2 must be invoked with --outSAMattributes ... CB
+so each read carries its manifest cell-id (see starsolo.snmk).
+
+feature_set is constrained to repeats|genic_repeats|intergenic_repeats:
+at (genes, gene_id) STARsolo's own Solo.out/Gene/raw/ matrix is canonical
+and re-counting there would duplicate work.
+
+Reusable across pipeline_types. Expects from the including Snakefile:
+  _smartseq2_tagcount_sample_ids - list of {sample_id} values for the SmartSeq2 path
+                              (typically just ['smartseq2'])
+  starsolo_modes            - list of mm modes (unique, multi)
+  feature_sets              - list of feature_set names; only the repeat
+                              fsets in this list are expanded
+  gtf_for_feature_set       - function: wildcards -> GTF path
+  _smartseq2_tagcount_canonical_fs - feature_set name whose unique-mode BAM is
+                              used as the tagcount source (typically "genes")
+"""
+
+import os.path as op
+
+
+def _smartseq2_tagcount_param(name, default):
+    """Pull a knob from aligner_params.starsolo.sc_count with a fallback.
+    Same plumbing as the chromium path so the two share config knobs."""
+    return (config.get('aligner_params', {})
+            .get('starsolo', {})
+            .get('sc_count', {})
+            .get(name, default))
+
+
+_SMARTSEQ2_TAGCOUNT_FEATURE_SETS = ('repeats', 'genic_repeats', 'intergenic_repeats')
+
+
+rule smartseq2_tagcount:
+    wildcard_constraints:
+        feature_set = 'repeats|genic_repeats|intergenic_repeats',
+        multimapper_mode = 'unique|multi',
+    conda:
+        op.join(workflow.basedir, 'envs', 'sc_count.yaml')
+    input:
+        bam = op.join(config['base'], 'starsolo', '{sample_id}',
+                      'unique_' + _smartseq2_tagcount_canonical_fs,
+                      'Aligned.sortedByCoord.out.bam'),
+        bai = op.join(config['base'], 'starsolo', '{sample_id}',
+                      'unique_' + _smartseq2_tagcount_canonical_fs,
+                      'Aligned.sortedByCoord.out.bam.bai'),
+        # SmartSeq2 has no cell filtering: the manifest cell list IS the whitelist,
+        # and STARsolo writes it at raw/barcodes.tsv.
+        whitelist = op.join(config['base'], 'starsolo', '{sample_id}',
+                            'unique_' + _smartseq2_tagcount_canonical_fs,
+                            'Solo.out', 'Gene', 'raw', 'barcodes.tsv'),
+        gtf = gtf_for_feature_set,
+        script = op.join(workflow.basedir, 'scripts', 'sc_count_features.py'),
+    output:
+        matrix_dir = directory(op.join(
+            config['base'], 'starsolo_tagcount', '{sample_id}',
+            '{multimapper_mode}_{feature_set}', 'Solo.out', 'Gene', 'raw')),
+    params:
+        out_dir = op.join(config['base'], 'starsolo_tagcount', '{sample_id}',
+                          '{multimapper_mode}_{feature_set}'),
+    log:
+        op.join(config['base'], 'logs',
+                'smartseq2_tagcount_{sample_id}_{multimapper_mode}_{feature_set}.log'),
+    benchmark:
+        op.join(config['base'], 'benchmarks',
+                'smartseq2_tagcount_{sample_id}_{multimapper_mode}_{feature_set}.txt'),
+    threads: _smartseq2_tagcount_param('threads_per_recount', 8)
+    resources:
+        mem_mb = 4000,
+    shell:
+        """
+        mkdir -p {params.out_dir} $(dirname {log})
+        python {input.script} \
+            --bam {input.bam} \
+            --gtf {input.gtf} \
+            --whitelist {input.whitelist} \
+            --out-dir {params.out_dir} \
+            --multimapper {wildcards.multimapper_mode} \
+            --umi-dedup none \
+            --cb-tag RG \
+            --threads {threads} \
+            2> {log}
+        """
+
+
+def _all_smartseq2_tagcount_targets():
+    """Expand to all (sample, mode, feature_set) SmartSeq2 tagcount outputs.
+    Limited to repeat feature sets: at (genes, gene_id) STARsolo's own
+    Solo.out/Gene/raw/ matrix is canonical."""
+    fs_subset = [fs for fs in feature_sets if fs in _SMARTSEQ2_TAGCOUNT_FEATURE_SETS]
+    return [
+        op.join(config['base'], 'starsolo_tagcount', sid,
+                f'{mm}_{fs}', 'Solo.out', 'Gene', 'raw')
+        for sid in _smartseq2_tagcount_sample_ids
+        for mm in starsolo_modes
+        for fs in fs_subset
+    ]
+
+
+rule smartseq2_tagcount_all:
+    """Convenience target: ask snakemake for this to materialise every SmartSeq2
+    tagcount output without touching the default `all` rule."""
+    input:
+        _all_smartseq2_tagcount_targets(),

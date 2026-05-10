@@ -46,7 +46,12 @@ rule starsolo_smartseq2:
                       'Aligned.sortedByCoord.out.bam'),
         raw_matrix_dir = directory(op.join(config['base'], 'starsolo', 'smartseq2',
                                            '{multimapper_mode}_{feature_set}',
-                                           'Solo.out', 'Gene', 'raw'))
+                                           'Solo.out', 'Gene', 'raw')),
+        # Named so smartseq2_tagcount can use it as the cell whitelist (SmartSeq2
+        # has --soloCellFilter None, so raw/ is the only output).
+        raw_barcodes = op.join(config['base'], 'starsolo', 'smartseq2',
+                               '{multimapper_mode}_{feature_set}',
+                               'Solo.out', 'Gene', 'raw', 'barcodes.tsv')
     params:
         out_prefix = op.join(config['base'], 'starsolo', 'smartseq2',
                              '{multimapper_mode}_{feature_set}') + '/',
@@ -83,7 +88,7 @@ rule starsolo_smartseq2:
              --soloCellReadStats None \
              --soloUMIdedup NoDedup \
              --soloMultiMappers {params.solo_multimappers} \
-             --outSAMattributes NH HI AS NM \
+             --outSAMattributes NH HI AS NM RG \
              --outSAMtype BAM SortedByCoordinate \
              --limitBAMsortRAM {params.max_ram_bytes} \
              {params.extra_args} 2> {log}
@@ -109,7 +114,12 @@ rule starsolo_chromium:
                       'Aligned.sortedByCoord.out.bam'),
         raw_matrix_dir = directory(op.join(config['base'], 'starsolo', 'chromium',
                                            '{multimapper_mode}_{feature_set}',
-                                           'Solo.out', 'Gene', 'raw'))
+                                           'Solo.out', 'Gene', 'raw')),
+        # Named so starsolo_tagcount can pick it up as the simulation
+        # whitelist (sim runs --soloCellFilter None, so filtered/ is empty).
+        raw_barcodes = op.join(config['base'], 'starsolo', 'chromium',
+                               '{multimapper_mode}_{feature_set}',
+                               'Solo.out', 'Gene', 'raw', 'barcodes.tsv')
     params:
         out_prefix = op.join(config['base'], 'starsolo', 'chromium',
                              '{multimapper_mode}_{feature_set}') + '/',

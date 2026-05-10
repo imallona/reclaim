@@ -1,0 +1,39 @@
+#!/usr/bin/env snakemake -s
+"""
+Parse STAR Log.final.out files into one TSV.
+
+The starsolo rule does not declare Log.final.out as an output, so the rule
+takes BAM paths as input (declared) and reads Log.final.out from the same
+directory. The caller sets _starsolo_log_summary_inputs before include.
+"""
+
+import os.path as op
+
+
+_starsolo_log_summary_script = op.join(
+    workflow.basedir, 'scripts', 'parse_star_log.py'
+)
+_starsolo_log_summary_tsv = op.join(
+    config['base'], 'qc', 'starsolo_log_summary.tsv'
+)
+
+
+rule summarize_starsolo_logs:
+    input:
+        bams = _starsolo_log_summary_inputs,
+        script = _starsolo_log_summary_script,
+    output:
+        tsv = _starsolo_log_summary_tsv,
+    params:
+        outdir = op.dirname(_starsolo_log_summary_tsv),
+    log:
+        op.join(config['base'], 'logs', 'summarize_starsolo_logs.log'),
+    shell:
+        """
+        mkdir -p {params.outdir}
+        log_args=""
+        for bam in {input.bams}; do
+            log_args="$log_args --log $(dirname $bam)/Log.final.out"
+        done
+        python {input.script} $log_args --out {output.tsv} 2> {log}
+        """

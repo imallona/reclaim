@@ -3,6 +3,24 @@ indices_base: "../results/shared"
 
 pipeline_type: sc
 
+# sc_count_mode picks the STAR-side counting architecture. per_featureset
+# is one STARsolo run per (sample, feature_set) with native Gene counting.
+# tagcount aligns once with genes.gtf and re-counts the BAM via
+# workflow/scripts/sc_count_features.py, writing under starsolo_tagcount/.
+# Repogle uses tagcount: alignment phase shrinks from 132 STAR runs to 44
+# (one per library against genes.gtf), and the same BAM is recounted for
+# genic_repeats and intergenic_repeats. The default `all` rule honours
+# this flag, so no special target is needed on the snakemake CLI.
+sc_count_mode: tagcount
+
+# Parse STAR Log.final.out into qc/starsolo_log_summary.tsv for the report.
+starsolo_log_summary: true
+
+# Walk each library's BAM to compute per-cell mismatch rates from the NM
+# tag, restricted to cells in cells_to_perturbation.tsv. Joined to gene
+# and guide identity in the report.
+per_cell_mismatch: true
+
 # samples are populated from a second --configfile (paper Phase 1 output):
 #   ../results/paper/repogle_2022/data/repogle_2022_samples.yaml
 # That file provides dataset.samples.{KD6_<gemgroup>_essential}.srrs.
@@ -75,8 +93,12 @@ report:
   cells_to_perturbation: "../results/paper/repogle_2022/data/cells_to_perturbation.tsv"
   params:
     - starsolo_base
+    - starsolo_tagcount_base
+    - sc_count_mode
     - indices_base
     - cells_to_perturbation
     - report_outdir
     - feature_sets
     - starsolo_modes
+    - starsolo_log_summary
+    - per_cell_mismatch

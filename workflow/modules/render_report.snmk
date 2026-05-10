@@ -11,8 +11,9 @@ The config report: section must contain:
 
 Known resolvable param keys:
   cells_to_perturbation (resolved from config.report.cells_to_perturbation)
-  counts_dir, report_outdir, starsolo_base, kallisto_base, indices_base,
-  metadata, sample_metadata, feature_sets, starsolo_modes
+  counts_dir, report_outdir, starsolo_base, starsolo_tagcount_base,
+  kallisto_base, indices_base, metadata, sample_metadata, feature_sets,
+  starsolo_modes, sc_count_mode, starsolo_log_summary, per_cell_mismatch
 """
 
 import os.path as op
@@ -30,6 +31,7 @@ _known_params = {
     'counts_dir': op.abspath(op.join(config['base'], 'counts')),
     'report_outdir': op.abspath(_outdir),
     'starsolo_base': op.abspath(op.join(config['base'], 'starsolo')),
+    'starsolo_tagcount_base': op.abspath(op.join(config['base'], 'starsolo_tagcount')),
     'kallisto_base': op.abspath(op.join(config['base'], 'kallisto')),
     'indices_base': _indices_base,
     'metadata': op.abspath(op.join(config['base'], 'metadata', 'cell_metadata.txt')),
@@ -46,6 +48,13 @@ _known_params = {
         config.get('aligner_params', {}).get('starsolo', {})
               .get('multimapper_modes', ['unique'])
     ),
+    'sc_count_mode': config.get('sc_count_mode', ''),
+    'starsolo_log_summary': op.abspath(op.join(
+        config['base'], 'qc', 'starsolo_log_summary.tsv'
+    )),
+    'per_cell_mismatch': op.abspath(op.join(
+        config['base'], 'qc', 'per_cell_mismatch.tsv'
+    )),
 }
 
 _requested_keys = _report_cfg.get('params', list(_known_params.keys()))

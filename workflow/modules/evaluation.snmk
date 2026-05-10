@@ -20,6 +20,13 @@ if sim_technology == 'smartseq2' and 'multi' in starsolo_modes:
     starsolo_modes = [m for m in starsolo_modes if m != 'multi']
 bowtie2_modes = config.get('aligner_params', {}).get('bowtie2', {}).get(
     'multimapper_modes', ['unique'])
+kallisto_modes = config.get('aligner_params', {}).get('kallisto', {}).get(
+    'multimapper_modes', ['unique'])
+alevin_modes = config.get('aligner_params', {}).get('alevin', {}).get(
+    'multimapper_modes', ['unique'])
+if sim_technology == 'smartseq2':
+    kallisto_modes = [m for m in kallisto_modes if m == 'unique'] or ['unique']
+    alevin_modes = [m for m in alevin_modes if m == 'unique'] or ['unique']
 granularities = config.get('granularities', ['family_id'])
 sim_mutation_rate = config.get('simulation', {}).get('mutation_rate', 0.0)
 evaluation_script = op.join(workflow.basedir, 'scripts', 'evaluate.py')
@@ -53,14 +60,21 @@ def eval_benchmark(wildcards):
         if sim_technology == 'smartseq2':
             return op.join(config['base'], 'benchmarks',
                            f'salmon_{fs}_quant_smartseq2_cell_001.txt')
+        # alevin chromium rule writes per-mode benchmark files
         return op.join(config['base'], 'benchmarks',
-                       f'salmon_{fs}_alevin_chromium.txt')
+                       f'salmon_{fs}_alevin_chromium_{mm}.txt')
+    if aligner == 'starsolo_tagcount':
+        # one tagcount benchmark per (sample, mode, feature_set); the
+        # evaluation looks at the canonical sim_technology sample.
+        return op.join(config['base'], 'benchmarks',
+                       f'starsolo_tagcount_{sim_technology}_{mm}_{fs}.txt')
     # kallisto
     if sim_technology == 'smartseq2':
         return op.join(config['base'], 'benchmarks',
                        f'kallisto_{fs}_smartseq2_cell_001.txt')
+    # kallisto chromium: bustools count rule writes per-mode benchmark files
     return op.join(config['base'], 'benchmarks',
-                   f'kallisto_{fs}_bus_chromium.txt')
+                   f'bustools_{fs}_count_{mm}.txt')
 rule evaluate_combination:
     """Evaluate one (aligner, feature_set, granularity, multimapper_mode) combination."""
     conda: op.join(workflow.basedir, 'envs', 'evaluation.yaml')
@@ -77,10 +91,10 @@ rule evaluate_combination:
         per_family = op.join(eval_dir,
             '{aligner}_{feature_set}_{granularity}_{multimapper_mode}_per_family_metrics.tsv')
     wildcard_constraints:
-        aligner = 'starsolo|kallisto|alevin|bowtie2',
+        aligner = 'starsolo|starsolo_tagcount|kallisto|alevin|bowtie2',
         feature_set = 'repeats|genic_repeats|intergenic_repeats',
         granularity = 'locus|gene_id|family_id|class_id',
-        multimapper_mode = 'unique|multi'
+        multimapper_mode = 'unique|multi|em|noem'
     params:
         mutation_rate = sim_mutation_rate,
         benchmark_file = eval_benchmark,
@@ -117,6 +131,14 @@ rule aggregate_global_metrics:
             +
             (expand(
                 op.join(eval_dir,
+                        'starsolo_tagcount_{feature_set}_{granularity}_{multimapper_mode}_global_metrics.tsv'),
+                feature_set=_eval_fsets,
+                granularity=[g for g in granularities if g != 'locus'],
+                multimapper_mode=starsolo_modes)
+             if 'starsolo_tagcount' in active_aligners else [])
+            +
+            (expand(
+                op.join(eval_dir,
                         'bowtie2_{feature_set}_{granularity}_{multimapper_mode}_global_metrics.tsv'),
                 feature_set=_eval_fsets,
                 granularity=granularities,
@@ -125,11 +147,19 @@ rule aggregate_global_metrics:
             +
             (expand(
                 op.join(eval_dir,
-                        '{aligner}_{feature_set}_{granularity}_unique_global_metrics.tsv'),
-                aligner=[a for a in _pseudo_aligners],
+                        'kallisto_{feature_set}_{granularity}_{multimapper_mode}_global_metrics.tsv'),
                 feature_set=_eval_fsets,
-                granularity=granularities)
-             if _pseudo_aligners else [])
+                granularity=granularities,
+                multimapper_mode=kallisto_modes)
+             if 'kallisto' in active_aligners else [])
+            +
+            (expand(
+                op.join(eval_dir,
+                        'alevin_{feature_set}_{granularity}_{multimapper_mode}_global_metrics.tsv'),
+                feature_set=_eval_fsets,
+                granularity=granularities,
+                multimapper_mode=alevin_modes)
+             if 'alevin' in active_aligners else [])
         )
     output:
         summary = op.join(eval_dir, 'summary_global_metrics.tsv')
@@ -162,6 +192,14 @@ rule render_evaluation_report:
             +
             (expand(
                 op.join(eval_dir,
+                        'starsolo_tagcount_{feature_set}_{granularity}_{multimapper_mode}_per_cell_metrics.tsv'),
+                feature_set=_eval_fsets,
+                granularity=[g for g in granularities if g != 'locus'],
+                multimapper_mode=starsolo_modes)
+             if 'starsolo_tagcount' in active_aligners else [])
+            +
+            (expand(
+                op.join(eval_dir,
                         'bowtie2_{feature_set}_{granularity}_{multimapper_mode}_per_cell_metrics.tsv'),
                 feature_set=_eval_fsets,
                 granularity=granularities,
@@ -170,11 +208,19 @@ rule render_evaluation_report:
             +
             (expand(
                 op.join(eval_dir,
-                        '{aligner}_{feature_set}_{granularity}_unique_per_cell_metrics.tsv'),
-                aligner=[a for a in _pseudo_aligners],
+                        'kallisto_{feature_set}_{granularity}_{multimapper_mode}_per_cell_metrics.tsv'),
                 feature_set=_eval_fsets,
-                granularity=granularities)
-             if _pseudo_aligners else [])
+                granularity=granularities,
+                multimapper_mode=kallisto_modes)
+             if 'kallisto' in active_aligners else [])
+            +
+            (expand(
+                op.join(eval_dir,
+                        'alevin_{feature_set}_{granularity}_{multimapper_mode}_per_cell_metrics.tsv'),
+                feature_set=_eval_fsets,
+                granularity=granularities,
+                multimapper_mode=alevin_modes)
+             if 'alevin' in active_aligners else [])
         )
     output:
         report = op.join(eval_dir, 'evaluation_report.html')

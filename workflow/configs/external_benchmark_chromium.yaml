@@ -1,0 +1,75 @@
+## External-tool benchmark on the 10x Chromium simulation.
+## Consumes the multi-cell STARsolo BAM at
+## results/simulation_chromium/starsolo/chromium/unique_repeats/Aligned.sortedByCoord.out.bam
+## (one BAM with CB tags) and the ground truth at
+## results/simulation_chromium/simulations/chromium/ground_truth.tsv.
+##
+## scTE is the canonical single-cell tool for this scenario; TEtranscripts
+## and SQuIRE are bulk-only. The external_samples list is the per-cell
+## barcode universe to evaluate against; we use a manageable subset
+## matching the simulation's first 10 cells.
+
+base: "../results/simulation_chromium"
+indices_base: "../results/shared"
+
+pipeline_type: simulation
+
+reference:
+  assembly: hg38
+  ensembl_release: "112"
+  chromosomes: ["chr10"]
+  filter_genic: true
+  rmsk_source: ucsc_flatfile
+  genome_fasta: "../results/shared/refs/GRCh38.dna.primary_assembly.fa.gz"
+  repeats_gtf: "../results/shared/refs/hg38_rmsk_TE.gtf.gz"
+  genes_gtf: "../results/shared/refs/GRCh38.112.genes.gtf.gz"
+
+simulation:
+  technology: chromium
+  n_cells: 100
+  n_expressed_per_cell: 500
+  read_length: 90
+  seed: 42
+  mutation_rate: 0.001
+
+feature_sets:
+  - repeats
+  - genes
+  - genic_repeats
+  - intergenic_repeats
+
+aligners:
+  - starsolo
+
+aligner_params:
+  starsolo:
+    multimapper_modes: ["unique"]
+    extra_args: ""
+
+granularities:
+  - gene_id
+  - family_id
+  - class_id
+
+resources:
+  max_threads: 10
+  max_mem_mb: 20000
+
+external_benchmark: true
+external_tools:
+  - scte
+external_samples:
+  - cell_001
+  - cell_002
+  - cell_003
+  - cell_004
+  - cell_005
+  - cell_006
+  - cell_007
+  - cell_008
+  - cell_009
+  - cell_010
+external_granularities:
+  - family_id
+  - class_id
+external_min_overlap_fraction: 0.05

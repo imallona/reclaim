@@ -37,6 +37,7 @@ aligners:
   - kallisto
   - alevin
   - bowtie2
+  - starsolo_tagcount
 
 aligner_params:
   starsolo:

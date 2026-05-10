@@ -50,6 +50,19 @@ def build_gene_to_group(locus_map_path, granularity):
     return mapping
 
 
+def _format_value(v):
+    """Render a count as integer when whole (the common case) and as a
+    short float when fractional. sc_count_features.py emits 1/NH weights
+    in --multimapper multi mode, so silent int-truncation here would
+    invalidate tagcount-multi evaluation against ground truth."""
+    if v == 0:
+        return '0'
+    iv = int(v)
+    if iv == v:
+        return str(iv)
+    return f'{v:.6f}'
+
+
 def write_count_matrix(barcodes, feature_ids, sparse_mat, output_path, gene_to_group=None):
     if gene_to_group is None:
         # gene_id passthrough
@@ -60,11 +73,11 @@ def write_count_matrix(barcodes, feature_ids, sparse_mat, output_path, gene_to_g
                 if row.nnz == 0:
                     continue
                 values = row.toarray().flatten()
-                fh.write(feat_id + '\t' + '\t'.join(str(int(v)) for v in values) + '\n')
+                fh.write(feat_id + '\t' + '\t'.join(_format_value(v) for v in values) + '\n')
     else:
         # aggregate by group
         n_cells = len(barcodes)
-        group_counts = defaultdict(lambda: [0] * n_cells)
+        group_counts = defaultdict(lambda: [0.0] * n_cells)
         skipped = 0
         for feat_idx, feat_id in enumerate(feature_ids):
             group = gene_to_group.get(feat_id)
@@ -76,7 +89,7 @@ def write_count_matrix(barcodes, feature_ids, sparse_mat, output_path, gene_to_g
                 continue
             values = row.toarray().flatten()
             for ci, v in enumerate(values):
-                group_counts[group][ci] += int(v)
+                group_counts[group][ci] += float(v)
         if skipped:
             print('{} gene_ids had no group mapping (skipped)'.format(skipped), file=sys.stderr)
         with open(output_path, 'w') as fh:
@@ -85,7 +98,7 @@ def write_count_matrix(barcodes, feature_ids, sparse_mat, output_path, gene_to_g
                 vals = group_counts[group]
                 if all(v == 0 for v in vals):
                     continue
-                fh.write(group + '\t' + '\t'.join(str(v) for v in vals) + '\n')
+                fh.write(group + '\t' + '\t'.join(_format_value(v) for v in vals) + '\n')
 
 
 def main():

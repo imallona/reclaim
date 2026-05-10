@@ -1,0 +1,21 @@
+## Conda env for the scTE benchmark.
+## scTE consumes a STAR/STARsolo-aligned BAM with CB and UB tags and a
+## prebuilt scTE index. Writes a cell x repeat-family count matrix (gene-
+## level annotation appears alongside but we benchmark the repeat side
+## only).
+name: repeats_scte
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.9
+  - pip
+  - samtools
+  - numpy
+  - pandas
+  - anndata
+  - h5py
+  - scipy
+  - pip:
+      - scTE==1.0.0

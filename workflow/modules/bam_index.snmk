@@ -1,0 +1,40 @@
+#!/usr/bin/env snakemake -s
+"""
+bam_index: build BAI indexes for coordinate-sorted BAMs produced by
+STARsolo. Factored out of the per-technology tagcount modules so chromium
+and smartseq2 paths can both depend on the index without redefining the
+rule (snakemake disallows two rules producing the same output).
+"""
+
+import os.path as op
+
+
+rule index_starsolo_sortedbam:
+    """Build a BAI for a STARsolo coordinate-sorted BAM. Generic over
+    {sample_id}/{multimapper_mode}_{feature_set} so any tagcount or
+    downstream rule can depend on the index by adding the .bai path
+    to its input list."""
+    wildcard_constraints:
+        feature_set = 'genes|repeats|genic_repeats|intergenic_repeats',
+        multimapper_mode = 'unique|multi',
+    input:
+        bam = op.join(config['base'], 'starsolo', '{sample_id}',
+                      '{multimapper_mode}_{feature_set}',
+                      'Aligned.sortedByCoord.out.bam'),
+    output:
+        bai = op.join(config['base'], 'starsolo', '{sample_id}',
+                      '{multimapper_mode}_{feature_set}',
+                      'Aligned.sortedByCoord.out.bam.bai'),
+    conda:
+        op.join(workflow.basedir, 'envs', 'repeats.yaml')
+    log:
+        op.join(config['base'], 'logs',
+                'index_starsolo_{sample_id}_{multimapper_mode}_{feature_set}.log'),
+    threads: 4
+    resources:
+        mem_mb = 2000,
+    shell:
+        """
+        mkdir -p $(dirname {output.bai}) $(dirname {log})
+        samtools index -@ {threads} {input.bam} 2> {log}
+        """

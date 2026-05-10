@@ -80,6 +80,41 @@ rule normalize_starsolo:
         """
 
 
+# Same shape as normalize_starsolo but reads from the starsolo_tagcount
+# tree produced by sc_count_features.py. Outputs land at
+#   counts/starsolo_tagcount_<feature_set>_<granularity>_<multimapper_mode>.tsv
+# so the evaluation pipeline picks "starsolo_tagcount" up as just-another-aligner.
+rule normalize_starsolo_tagcount:
+    conda: op.join(workflow.basedir, 'envs', 'evaluation.yaml')
+    input:
+        raw_matrix_dir = op.join(config['base'], 'starsolo_tagcount', sim_technology,
+                                 '{multimapper_mode}_{feature_set}',
+                                 'Solo.out', 'Gene', 'raw'),
+        locus_map = normalize_locus_map
+    output:
+        counts_tsv = op.join(normalize_dir,
+                             'starsolo_tagcount_{feature_set}_{granularity}_{multimapper_mode}.tsv')
+    wildcard_constraints:
+        multimapper_mode = _mm_constraint,
+        feature_set = _feat_constraint,
+        granularity = _gran_constraint
+    params:
+        locus_map_arg = lambda wc, input: (
+            f'--locus-map {input.locus_map}' if input.locus_map else '')
+    log:
+        op.join(config['base'], 'logs',
+                'normalize_starsolo_tagcount_{feature_set}_{granularity}_{multimapper_mode}.log')
+    shell:
+        """
+        python {workflow.basedir}/scripts/normalize_starsolo.py \
+            --raw-dir {input.raw_matrix_dir} \
+            {params.locus_map_arg} \
+            --multimapper-mode {wildcards.multimapper_mode} \
+            --granularity {wildcards.granularity} \
+            --output {output.counts_tsv} 2> {log}
+        """
+
+
 # ---------------------------------------------------------------------------
 # Kallisto normalisation - one rule, branches on sim_technology via params
 # ---------------------------------------------------------------------------
@@ -103,22 +138,25 @@ if sim_technology == 'smartseq2':
 else:
     def _kallisto_norm_input(wc):
         return [
-            op.join(config['base'], 'kallisto', wc.feature_set, 'chromium', 'counts.mtx'),
             op.join(config['base'], 'kallisto', wc.feature_set, 'chromium',
-                    'counts.barcodes.txt'),
-            op.join(config['base'], 'kallisto', wc.feature_set, 'chromium', 'counts.genes.txt')
+                    wc.multimapper_mode, 'counts.mtx'),
+            op.join(config['base'], 'kallisto', wc.feature_set, 'chromium',
+                    wc.multimapper_mode, 'counts.barcodes.txt'),
+            op.join(config['base'], 'kallisto', wc.feature_set, 'chromium',
+                    wc.multimapper_mode, 'counts.genes.txt')
         ]
     _kallisto_norm_t2g = lambda wc: []
     _kallisto_norm_cell_ids = ''
     _kallisto_norm_cell_dirs = lambda wc: ''
-    _kallisto_norm_mtx = lambda wc: op.join(config['base'], 'kallisto',
-                                            wc.feature_set, 'chromium', 'counts.mtx')
-    _kallisto_norm_barcodes = lambda wc: op.join(config['base'], 'kallisto',
-                                                 wc.feature_set, 'chromium',
-                                                 'counts.barcodes.txt')
-    _kallisto_norm_genes_file = lambda wc: op.join(config['base'], 'kallisto',
-                                                   wc.feature_set, 'chromium',
-                                                   'counts.genes.txt')
+    _kallisto_norm_mtx = lambda wc: op.join(
+        config['base'], 'kallisto', wc.feature_set, 'chromium',
+        wc.multimapper_mode, 'counts.mtx')
+    _kallisto_norm_barcodes = lambda wc: op.join(
+        config['base'], 'kallisto', wc.feature_set, 'chromium',
+        wc.multimapper_mode, 'counts.barcodes.txt')
+    _kallisto_norm_genes_file = lambda wc: op.join(
+        config['base'], 'kallisto', wc.feature_set, 'chromium',
+        wc.multimapper_mode, 'counts.genes.txt')
     _kallisto_norm_locus_map = normalize_locus_map
 
 
@@ -130,10 +168,11 @@ rule normalize_kallisto:
         locus_map = _kallisto_norm_locus_map
     output:
         counts_tsv = op.join(normalize_dir,
-                             'kallisto_{feature_set}_{granularity}_unique.tsv')
+                             'kallisto_{feature_set}_{granularity}_{multimapper_mode}.tsv')
     wildcard_constraints:
         granularity = _locus_gran_constraint,
-        feature_set = _feat_constraint
+        feature_set = _feat_constraint,
+        multimapper_mode = 'unique|em'
     params:
         technology = sim_technology,
         cell_ids = _kallisto_norm_cell_ids,
@@ -144,7 +183,7 @@ rule normalize_kallisto:
         locus_map_arg = lambda wc, input: f'--locus-map {input.locus_map}' if input.locus_map else ''
     log:
         op.join(config['base'], 'logs',
-                'normalize_kallisto_{feature_set}_{granularity}.log')
+                'normalize_kallisto_{feature_set}_{granularity}_{multimapper_mode}.log')
     shell:
         """
         if [ "{params.technology}" = "smartseq2" ]; then
@@ -187,13 +226,14 @@ else:
     def _alevin_norm_input(wc):
         return [
             op.join(config['base'], 'alevin', wc.feature_set, 'chromium',
-                    'alevin', 'quants_mat.mtx.gz')
+                    wc.multimapper_mode, 'alevin', 'quants_mat.mtx.gz')
         ]
     _alevin_norm_t2g = lambda wc: []
     _alevin_norm_cell_ids = ''
     _alevin_norm_cell_dirs = lambda wc: ''
-    _alevin_norm_alevin_dir = lambda wc: op.join(config['base'], 'alevin',
-                                                 wc.feature_set, 'chromium', 'alevin')
+    _alevin_norm_alevin_dir = lambda wc: op.join(
+        config['base'], 'alevin', wc.feature_set, 'chromium',
+        wc.multimapper_mode, 'alevin')
     _alevin_norm_locus_map = normalize_locus_map
 
 
@@ -205,10 +245,11 @@ rule normalize_alevin:
         locus_map = _alevin_norm_locus_map
     output:
         counts_tsv = op.join(normalize_dir,
-                             'alevin_{feature_set}_{granularity}_unique.tsv')
+                             'alevin_{feature_set}_{granularity}_{multimapper_mode}.tsv')
     wildcard_constraints:
         granularity = _locus_gran_constraint,
-        feature_set = _feat_constraint
+        feature_set = _feat_constraint,
+        multimapper_mode = 'unique|noem'
     params:
         technology = sim_technology,
         cell_ids = _alevin_norm_cell_ids,
@@ -217,7 +258,7 @@ rule normalize_alevin:
         locus_map_arg = lambda wc, input: f'--locus-map {input.locus_map}' if input.locus_map else ''
     log:
         op.join(config['base'], 'logs',
-                'normalize_alevin_{feature_set}_{granularity}.log')
+                'normalize_alevin_{feature_set}_{granularity}_{multimapper_mode}.log')
     shell:
         """
         if [ "{params.technology}" = "smartseq2" ]; then

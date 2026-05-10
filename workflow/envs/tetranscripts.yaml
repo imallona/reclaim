@@ -1,0 +1,16 @@
+## Conda env for the TEtranscripts benchmark.
+## TEtranscripts is bulk-only and consumes a STAR-aligned BAM plus the gene
+## and TE GTFs already produced by the reference module. It writes a per-
+## subfamily count table at the gene_id granularity (RepeatMasker subfamily
+## name).
+name: repeats_tetranscripts
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - samtools
+  - pip:
+      - TEtranscripts==2.2.3

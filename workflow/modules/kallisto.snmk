@@ -6,7 +6,13 @@ SmartSeq2: kallisto quant per cell (one run per cell FASTQ).
 Chromium:  kallisto bus with bustools sort and count.
 
 Both modes support {feature_set}: genes, repeats, genic_repeats, intergenic_repeats.
-Kallisto always runs in unique-read mode (no multimapper_mode wildcard needed).
+
+Multimapper handling (chromium only, via bustools count flag):
+  unique : default --genecounts; UMIs assigned to multiple genes are
+           discarded. This was the historical default and is kept as
+           the back-compat behavior when no multimapper_modes are set.
+  em     : adds --em; bustools redistributes ambiguous UMIs via EM.
+SmartSeq2 mode runs unique-only (kallisto quant per cell, no bustools).
 
 Bulk RNA-seq uses a separate kallisto rule in modules/bulk_single.snmk or
 modules/bulk_paired.snmk. Chromium single-cell data uses kallisto_sc.snmk.
@@ -25,6 +31,9 @@ _kb_cb_len = config.get('simulation', config.get('real_data', {})).get('cb_lengt
 _kb_umi_len = config.get('simulation', config.get('real_data', {})).get('umi_length', 12)
 # Kallisto bus geometry: BC on R1[0:cb], UMI on R1[cb:cb+umi], cDNA on R2
 _kb_tech_flag = f'-x 0,0,{_kb_cb_len}:0,{_kb_cb_len},{_kb_cb_len + _kb_umi_len}:1,0,0'
+
+# Bustools count flag table, keyed by multimapper_mode wildcard.
+_bustools_em_flag = {'unique': '', 'em': '--em'}
 
 
 rule kallisto_quant_smartseq2_cell:
@@ -133,26 +142,35 @@ rule bustools_count_chromium:
         t2g = lambda wc: t2g_path(wc)
     output:
         counts = op.join(config['base'], 'kallisto', '{feature_set}',
-                         'chromium', 'counts.mtx'),
+                         'chromium', '{multimapper_mode}', 'counts.mtx'),
         barcodes = op.join(config['base'], 'kallisto', '{feature_set}',
-                           'chromium', 'counts.barcodes.txt'),
+                           'chromium', '{multimapper_mode}', 'counts.barcodes.txt'),
         genes = op.join(config['base'], 'kallisto', '{feature_set}',
-                        'chromium', 'counts.genes.txt')
+                        'chromium', '{multimapper_mode}', 'counts.genes.txt')
     wildcard_constraints:
-        feature_set = 'genes|repeats|genic_repeats|intergenic_repeats'
+        feature_set = 'genes|repeats|genic_repeats|intergenic_repeats',
+        multimapper_mode = 'unique|em'
     params:
-        out_prefix = op.join(config['base'], 'kallisto', '{feature_set}', 'chromium', 'counts')
+        out_prefix = op.join(config['base'], 'kallisto', '{feature_set}',
+                             'chromium', '{multimapper_mode}', 'counts'),
+        out_dir = op.join(config['base'], 'kallisto', '{feature_set}',
+                          'chromium', '{multimapper_mode}'),
+        em_flag = lambda wc: _bustools_em_flag[wc.multimapper_mode],
     log:
-        op.join(config['base'], 'logs', 'bustools_{feature_set}_count.log')
+        op.join(config['base'], 'logs',
+                'bustools_{feature_set}_count_{multimapper_mode}.log')
     benchmark:
-        op.join(config['base'], 'benchmarks', 'bustools_{feature_set}_count.txt')
+        op.join(config['base'], 'benchmarks',
+                'bustools_{feature_set}_count_{multimapper_mode}.txt')
     shell:
         """
+        mkdir -p {params.out_dir}
         bustools count \
             --ec {input.ec} \
             --txnames {input.transcripts} \
             --genemap {input.t2g} \
             --genecounts \
+            {params.em_flag} \
             --output {params.out_prefix} \
             {input.bus} 2> {log}
         """

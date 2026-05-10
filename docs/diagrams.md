@@ -149,6 +149,43 @@ flowchart TD
 
 ---
 
+## sc STAR counting modes (sc_count_mode)
+
+The sc pipeline supports two STAR-side counting architectures, selectable per yaml via `sc_count_mode`. They write to different output roots so existing analyses are not invalidated when a new run picks the alternate mode.
+
+```mermaid
+flowchart LR
+    subgraph m1["sc_count_mode: per_featureset (default)"]
+        A1[fastqs] --> S1["STAR + STARsolo<br/>--sjdbGTFfile genes.gtf<br/>--soloFeatures Gene"]
+        A1 --> S2["STAR + STARsolo<br/>--sjdbGTFfile genic_repeats.gtf<br/>--soloFeatures Gene"]
+        A1 --> S3["STAR + STARsolo<br/>--sjdbGTFfile intergenic_repeats.gtf<br/>--soloFeatures Gene"]
+        S1 --> O1["starsolo/sid/MM_genes/Solo.out/Gene/raw"]
+        S2 --> O2["starsolo/sid/MM_genic_repeats/Solo.out/Gene/raw"]
+        S3 --> O3["starsolo/sid/MM_intergenic_repeats/Solo.out/Gene/raw"]
+    end
+
+    subgraph m2["sc_count_mode: tagcount"]
+        B1[fastqs] --> T1["STAR + STARsolo<br/>--sjdbGTFfile genes.gtf<br/>BAM + gene whitelist"]
+        T1 --> BAM[BAM with CB+UB tags]
+        T1 --> WL[Solo.out/Gene/raw/barcodes.tsv]
+        BAM & WL --> R1["sc_count_features.py --gtf genes.gtf"]
+        BAM & WL --> R2["sc_count_features.py --gtf genic_repeats.gtf"]
+        BAM & WL --> R3["sc_count_features.py --gtf intergenic_repeats.gtf"]
+        R1 --> P1["starsolo_tagcount/sid/MM_genes/Solo.out/Gene/raw"]
+        R2 --> P2["starsolo_tagcount/sid/MM_genic_repeats/Solo.out/Gene/raw"]
+        R3 --> P3["starsolo_tagcount/sid/MM_intergenic_repeats/Solo.out/Gene/raw"]
+    end
+```
+
+Trade-offs:
+
+- `per_featureset` is the published baseline. Splice junctions are recomputed per feature_set GTF (a known suboptimality, since repeats should not contribute splice junctions); counting uses STARsolo's native `Gene` semantics including its `EM` multimapper iteration in multi mode.
+- `tagcount` aligns once with gene-only splice junctions, then recounts the BAM with `sc_count_features.py`. The recount filters reads to the cell barcodes already whitelisted by STARsolo's gene-counting pass (avoiding the huge unfiltered all-CB matrix), deduplicates UMIs at Hamming-1 (matching STARsolo's `1MM_All` default), and treats multimappers as `1/NH` per locus (a non-iterative approximation of STARsolo's EM, see `docs/methods.md` for the bias direction). Runs `~3x` faster on the alignment phase and indexes at the gene level so reads in introns can also count toward their parent gene.
+
+The two modes are explicitly side-by-side: their outputs live at different paths and downstream consumers can read either by configuration. A comparison Rmd diffs the two count tables in unique mode (where they should agree to the count) and characterises systematic differences in multi mode (where the EM-vs-1/NH bias shows up).
+
+---
+
 ## quantification granularity
 
 ```mermaid

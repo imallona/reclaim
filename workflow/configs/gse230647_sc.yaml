@@ -3,6 +3,13 @@ indices_base: "../results/shared"
 
 pipeline_type: sc
 
+# sc_count_mode picks the STAR-side counting architecture. per_featureset
+# (default) is one STARsolo run per (sample, feature_set) with native Gene
+# counting. tagcount aligns once with genes.gtf and re-counts the
+# BAM via workflow/scripts/sc_count_features.py, writing under
+# starsolo_tagcount/ alongside (not replacing) the per_featureset outputs.
+sc_count_mode: per_featureset
+
 
 reference:
   assembly: hg38

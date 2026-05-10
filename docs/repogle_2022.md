@@ -61,9 +61,11 @@ Phase 2 prep (implemented): SRA accession resolution per library.
 Phase 2 (alignment, run separately on the compute machine): SRA fastq download and STARsolo alignment.
 
   - Driven by `workflow/configs/repogle_kd6_sc.yaml` with `pipeline_type: sc`. Reference is `hg38` Ensembl 112 (shared with `gse230647_sc.yaml`).
-  - One STAR run per (library, feature_set) with `--soloMultiMappers Unique EM`. The unique and EM count matrices are written from the same alignment, and the EM matrix is mirrored into the `multi_<feature_set>/` sister directory so downstream rules see both modes without re-aligning.
-  - Run: `cd workflow; snakemake --use-conda --cores N --configfile ../results/paper/repogle_2022/data/repogle_kd6_sc_merged.yaml`.
-  - Output: per-library STARsolo matrices for genes, genic_repeats, intergenic_repeats at gene_id, family_id, and class_id granularity, under `results/repogle_kd6_sc/starsolo/<KD6_N_essential>/<mode>_<feature_set>/`.
+  - The yaml encodes `sc_count_mode: tagcount` so the architecture is selected by config alone, no special CLI target. The default `all` rule honours `sc_count_mode`: in `tagcount` mode it requests only the canonical `unique_genes` BAM per library plus the `starsolo_tagcount/` outputs, dropping the per-feature_set fanout. To run the legacy per-feature_set path on Repogle, flip the yaml to `sc_count_mode: per_featureset` (no other change required; outputs land at `starsolo/...` and coexist with any `starsolo_tagcount/` outputs already on disk).
+  - In `tagcount` mode: one STARsolo run per library aligned with `genes.gtf` for splice junctions and gene counting; the same BAM is then re-counted by `workflow/scripts/sc_count_features.py` against `genes.gtf`, `genic_repeats.gtf`, and `intergenic_repeats.gtf`. Compresses 132 STAR runs (44 libraries × 3 feature_sets) to 44 STAR runs plus ~132 cheap recount steps. Outputs land at `results/repogle_kd6_sc/starsolo_tagcount/<KD6_N_essential>/<mode>_<feature_set>/`.
+  - In `per_featureset` mode: one STAR run per (library, feature_set) with `--soloMultiMappers Unique EM`. The unique and EM count matrices are written from the same alignment, and the EM matrix is mirrored into the `multi_<feature_set>/` sister directory so downstream rules see both modes without re-aligning. Outputs land at `results/repogle_kd6_sc/starsolo/<KD6_N_essential>/<mode>_<feature_set>/`.
+  - Run: `cd workflow; snakemake --use-conda --cores N --configfile ../results/paper/repogle_2022/data/repogle_kd6_sc_merged.yaml`. The merged yaml inherits `sc_count_mode` from `repogle_kd6_sc.yaml` via `resolve_repogle_2022_sra`.
+  - Per-library STARsolo matrices land at gene_id, family_id, and class_id granularity in either output tree.
 
 Phase 3 (per-perturbation RUVg DE plus per-library alignment QC; needs Phase 2 outputs):
 

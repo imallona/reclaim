@@ -9,6 +9,25 @@
 ## planted at a fixed set of repeat features, runs several normalization
 ## strategies, and reports power and false positive rate over n_iter replicates.
 ##
+## Two scenarios are supported via config keys:
+##   - default: a small fraction of repeats DE, mixed direction. Probes
+##     power and FPR; the "most features not DE" assumption underlying TMM
+##     holds and TMM should be unbiased.
+##   - coordinated derepression: a large fraction of repeats DE, all in the
+##     same direction (signed_fraction = 1). Mirrors the TDP-43 OE biology
+##     where many young retrotransposon subfamilies move up together. The
+##     "most features not DE" assumption breaks; TMM-on-repeats compresses
+##     the recovered logFC. Gene-library-size transfer fits norm factors on
+##     the gene matrix (where the assumption still holds) and is unbiased.
+##
+## Both scenarios share the same code path. Method coverage in both:
+##   none, TMM, RUVg_k1..k_max, gene_lib.
+##
+## Outputs: power/FPR per method per grid cell (de_simulations_results.tsv),
+## per-iteration summary (de_simulations_summary.tsv), and per-feature
+## recovered-vs-planted logFC for bias-slope estimation
+## (de_simulations_recovered_logfc.tsv, gzipped).
+##
 ## See docs/de_simulations.md for the plain-English description.
 
 suppressPackageStartupMessages({
@@ -87,6 +106,154 @@ simulate_count_matrix <- function(mu, dispersion, n_samples, lib_scale = 1,
 }
 
 
+## Plant DE assignments at the feature level. Returns the picked indices, a
+## per-feature logFC vector matching the full feature space, and a logical
+## flag indicating which features carry signal. The signed_fraction argument
+## controls how many of the picked features get a positive logFC (vs negative).
+## A signed_fraction of 1.0 means full coordinated derepression (all up); 0.5
+## means balanced; values in between scale linearly. class_weights, if set,
+## must be a named numeric vector with one entry per class_id; selection
+## probability is proportional to class weight.
+##
+## Asserts on bounds, length matching, and weight positivity guard against
+## silent miswiring from upstream YAML.
+select_de_features <- function(feature_id, n_de, fc, signed_fraction = 1.0,
+                               class_id = NULL, class_weights = NULL,
+                               seed = 1L) {
+  stopifnot(is.character(feature_id), length(feature_id) >= 2L,
+            !anyDuplicated(feature_id),
+            is.numeric(n_de), length(n_de) == 1L, n_de >= 0,
+            is.numeric(fc), length(fc) == 1L, fc > 0,
+            is.numeric(signed_fraction), length(signed_fraction) == 1L,
+            signed_fraction >= 0, signed_fraction <= 1)
+  n_feat <- length(feature_id)
+  n_de <- as.integer(min(n_de, n_feat))
+
+  if (!is.null(class_id) || !is.null(class_weights)) {
+    stopifnot(!is.null(class_id), !is.null(class_weights),
+              length(class_id) == n_feat,
+              !is.null(names(class_weights)),
+              all(class_weights >= 0), any(class_weights > 0))
+    weights <- class_weights[class_id]
+    weights[is.na(weights)] <- 0
+    stopifnot(any(weights > 0))
+  } else {
+    weights <- rep(1, n_feat)
+  }
+
+  set.seed(seed)
+  if (n_de == 0L) {
+    return(list(idx = integer(0),
+                logfc = numeric(n_feat),
+                planted = rep(FALSE, n_feat)))
+  }
+  idx <- sample.int(n_feat, n_de, prob = weights / sum(weights))
+
+  n_up <- as.integer(round(signed_fraction * n_de))
+  n_dn <- n_de - n_up
+  signs <- sample(c(rep(1, n_up), rep(-1, n_dn)))
+  stopifnot(length(signs) == n_de)
+
+  logfc <- numeric(n_feat)
+  logfc[idx] <- signs * log(fc)
+
+  planted <- rep(FALSE, n_feat)
+  planted[idx] <- TRUE
+
+  list(idx = idx, logfc = logfc, planted = planted)
+}
+
+
+## Resolve the per-feature class_id vector for the repeat matrix from an
+## optional class_map TSV. Returns NULL when class_map_path is empty.
+## Two TSV formats are accepted:
+##   - 2-column: feature_id, class_id (used as-is).
+##   - locus_map (4-column with transcript_id, gene_id, family_id, class_id):
+##     deduplicated on (granularity_column, class_id) and rolled up to a
+##     feature_id->class_id map. The granularity_column argument selects
+##     gene_id, family_id, or transcript_id, matching whatever level the
+##     repeat count matrix uses.
+## Missing features become NA class. The granularity_column argument is
+## ignored when the input is already a 2-column class_map. Kept in the
+## pure-R section so the helper is testable without Bioconductor.
+load_repeat_class_map <- function(class_map_path, feature_id,
+                                  granularity_column = "family_id") {
+  if (is.null(class_map_path) || !nzchar(class_map_path)) {
+    return(NULL)
+  }
+  stopifnot(file.exists(class_map_path),
+            granularity_column %in% c("gene_id", "family_id", "transcript_id"))
+  m <- read.table(class_map_path, header = TRUE, sep = "\t",
+                  stringsAsFactors = FALSE, check.names = FALSE)
+  stopifnot("class_id" %in% colnames(m))
+  if ("feature_id" %in% colnames(m)) {
+    key_col <- "feature_id"
+  } else {
+    stopifnot(granularity_column %in% colnames(m))
+    key_col <- granularity_column
+  }
+  ## Deduplicate on (key_col, class_id) and warn if the same key has more
+  ## than one class. The pipeline's locus_map should not produce that, so
+  ## the warning here is a tripwire.
+  m <- unique(m[, c(key_col, "class_id"), drop = FALSE])
+  dup_keys <- m[[key_col]][duplicated(m[[key_col]])]
+  if (length(dup_keys) > 0) {
+    warning(sprintf(
+      "load_repeat_class_map: %d feature(s) map to >1 class; first wins (e.g. %s)",
+      length(unique(dup_keys)), paste(head(dup_keys, 3), collapse = ", ")))
+    m <- m[!duplicated(m[[key_col]]), , drop = FALSE]
+  }
+  out <- m$class_id[match(feature_id, m[[key_col]])]
+  stopifnot(length(out) == length(feature_id))
+  out
+}
+
+
+## edgeR DE on a repeat count matrix using TMM size factors fit on the gene
+## matrix. Sample ordering must match between the two matrices; an assert
+## guards against silent reordering from caller code. No RUV covariates;
+## the design is whatever the caller passes.
+run_de_gene_lib <- function(repeat_counts, gene_counts, design) {
+  stopifnot(is.matrix(repeat_counts), is.matrix(gene_counts),
+            ncol(repeat_counts) == ncol(gene_counts),
+            identical(colnames(repeat_counts), colnames(gene_counts)),
+            qr(design)$rank == ncol(design),
+            nrow(design) == ncol(repeat_counts))
+  gene_dge <- DGEList(counts = gene_counts)
+  gene_dge <- calcNormFactors(gene_dge, method = "TMM")
+  dge <- DGEList(counts = repeat_counts,
+                 lib.size = gene_dge$samples$lib.size,
+                 norm.factors = gene_dge$samples$norm.factors)
+  dge <- estimateDisp(dge, design)
+  fit <- glmQLFit(dge, design)
+  qlf <- glmQLFTest(fit, coef = ncol(design))
+  topTags(qlf, n = Inf, sort.by = "none")$table
+}
+
+
+## Build a recovered-logFC table aligned to the full feature_id space.
+## Features filtered out before testing get NA recovered_logfc; the planted
+## flag and planted_logfc are still populated so the caller can compute bias
+## slope conditional on the feature being testable. Used for the
+## TMM-compression bias panel.
+recovered_logfc_table <- function(tt_df, feature_id, planted_logfc, planted) {
+  stopifnot(is.character(feature_id),
+            length(feature_id) == length(planted_logfc),
+            length(feature_id) == length(planted),
+            is.numeric(planted_logfc), is.logical(planted))
+  recovered <- rep(NA_real_, length(feature_id))
+  if (!is.null(tt_df) && nrow(tt_df) > 0) {
+    m <- match(feature_id, rownames(tt_df))
+    recovered[!is.na(m)] <- tt_df$logFC[m[!is.na(m)]]
+  }
+  data.frame(feature_id = feature_id,
+             planted = planted,
+             planted_logfc = planted_logfc,
+             recovered_logfc = recovered,
+             stringsAsFactors = FALSE)
+}
+
+
 pick_empirical_controls <- function(counts, design, n_controls) {
   stopifnot(qr(design)$rank == ncol(design),
             n_controls >= 1, n_controls <= nrow(counts))
@@ -138,11 +305,63 @@ score_calls <- function(tt_df, planted_features, fdr = 0.05) {
 }
 
 
+## Run all methods on a (filtered) repeat matrix and return a list of
+## per-method topTags tables. RUVg keys are "RUVg_k1".."RUVg_kN" by k.
+## Returns NULL entries for methods that could not run (e.g. rank-deficient
+## RUV designs at small sample sizes); callers must handle NULL.
+run_methods_on_replicate <- function(repeat_counts_f, gene_counts_f, design,
+                                     k_max, n_controls) {
+  stopifnot(is.matrix(repeat_counts_f), is.matrix(gene_counts_f),
+            ncol(repeat_counts_f) == ncol(gene_counts_f),
+            identical(colnames(repeat_counts_f), colnames(gene_counts_f)))
+  out <- list()
+  out[["none"]] <- if (nrow(repeat_counts_f) >= 2)
+    run_de_no_norm(repeat_counts_f, design) else NULL
+  out[["TMM"]] <- if (nrow(repeat_counts_f) >= 2)
+    run_de(repeat_counts_f, design) else NULL
+  out[["gene_lib"]] <- if (nrow(repeat_counts_f) >= 2 && nrow(gene_counts_f) >= 2)
+    tryCatch(run_de_gene_lib(repeat_counts_f, gene_counts_f, design),
+             error = function(e) NULL) else NULL
+
+  n_ctrl <- min(n_controls, max(0L, nrow(gene_counts_f) - 1L))
+  if (n_ctrl >= 1 && nrow(gene_counts_f) >= 2) {
+    controls <- pick_empirical_controls(gene_counts_f, design, n_ctrl)
+    pheno <- AnnotatedDataFrame(data.frame(
+      row.names = colnames(gene_counts_f)))
+    set1 <- newSeqExpressionSet(counts = gene_counts_f, phenoData = pheno)
+    for (k in seq_len(k_max)) {
+      key <- paste0("RUVg_k", k)
+      out[[key]] <- NULL
+      ruv_fit <- tryCatch(RUVg(set1, controls, k = k), error = function(e) NULL)
+      if (!is.null(ruv_fit)) {
+        W <- as.matrix(pData(ruv_fit)[, grep("^W_", colnames(pData(ruv_fit))),
+                                      drop = FALSE])
+        design_ruv <- cbind(design[, -ncol(design), drop = FALSE], W,
+                            design[, ncol(design), drop = FALSE])
+        if (qr(design_ruv)$rank == ncol(design_ruv) && nrow(repeat_counts_f) >= 2) {
+          out[[key]] <- tryCatch(run_de(repeat_counts_f, design_ruv),
+                                 error = function(e) NULL)
+        }
+      }
+    }
+  } else {
+    for (k in seq_len(k_max)) {
+      out[[paste0("RUVg_k", k)]] <- NULL
+    }
+  }
+  out
+}
+
+
 run_one_grid_cell <- function(gene_params, repeat_params, samples, condition,
                               gene_lib_scale, repeat_lib_scale,
                               fc, n_de_repeats, n_de_genes,
                               sigma_w, n_controls, k_max, fdr,
-                              n_iter, seed_base) {
+                              n_iter, seed_base,
+                              signed_fraction = 1.0,
+                              repeat_class_id = NULL,
+                              repeat_class_weights = NULL,
+                              record_recovered_logfc = TRUE) {
   n_samples <- length(samples)
   stopifnot(length(condition) == n_samples)
   cond_factor <- factor(condition, levels = sort(unique(condition)))
@@ -154,19 +373,27 @@ run_one_grid_cell <- function(gene_params, repeat_params, samples, condition,
   gene_w_loadings <- rnorm(length(gene_params$mu), 0, sigma_w)
   repeat_w_loadings <- rnorm(length(repeat_params$mu), 0, sigma_w)
 
-  set.seed(seed_base + 1L)
-  n_de_repeats <- min(n_de_repeats, length(repeat_params$mu))
-  de_repeat_idx <- sample.int(length(repeat_params$mu), n_de_repeats)
-  de_repeat_features <- repeat_params$feature_id[de_repeat_idx]
-  repeat_logfc <- numeric(length(repeat_params$mu))
-  repeat_logfc[de_repeat_idx] <- log(fc)
+  repeat_plant <- select_de_features(
+    feature_id = repeat_params$feature_id,
+    n_de = n_de_repeats, fc = fc,
+    signed_fraction = signed_fraction,
+    class_id = repeat_class_id,
+    class_weights = repeat_class_weights,
+    seed = seed_base + 1L)
+  de_repeat_features <- repeat_params$feature_id[repeat_plant$idx]
+  repeat_logfc <- repeat_plant$logfc
 
-  n_de_genes <- min(n_de_genes, length(gene_params$mu))
-  de_gene_idx <- sample.int(length(gene_params$mu), n_de_genes)
-  gene_logfc <- numeric(length(gene_params$mu))
-  gene_logfc[de_gene_idx] <- log(2) * sample(c(-1, 1), n_de_genes, replace = TRUE)
+  gene_plant <- select_de_features(
+    feature_id = gene_params$feature_id,
+    n_de = n_de_genes, fc = 2,
+    signed_fraction = 0.5,
+    seed = seed_base + 2L)
+  gene_logfc <- gene_plant$logfc
+
+  method_keys <- c("none", "TMM", "gene_lib", paste0("RUVg_k", seq_len(k_max)))
 
   iter_results <- list()
+  recovered_results <- list()
   for (i in seq_len(n_iter)) {
     seed_i <- seed_base + 100L + i
     gene_counts <- simulate_count_matrix(
@@ -190,48 +417,31 @@ run_one_grid_cell <- function(gene_params, repeat_params, samples, condition,
     keep_r <- rowSums(repeat_counts >= 1) >= 2L
     repeat_counts_f <- repeat_counts[keep_r, , drop = FALSE]
 
+    tt_per_method <- run_methods_on_replicate(
+      repeat_counts_f, gene_counts_f, design, k_max, n_controls)
+
     method_scores <- list()
-
-    if (nrow(repeat_counts_f) >= 2 && qr(design)$rank == ncol(design)) {
-      method_scores[["none"]] <- score_calls(
-        run_de_no_norm(repeat_counts_f, design), de_repeat_features, fdr)
-      method_scores[["TMM"]] <- score_calls(
-        run_de(repeat_counts_f, design), de_repeat_features, fdr)
-    } else {
-      method_scores[["none"]] <- list(power = NA, fpr = NA,
-                                      tp = NA, fn = NA, fp = NA, tn = NA)
-      method_scores[["TMM"]] <- method_scores[["none"]]
-    }
-
-    n_ctrl <- min(n_controls, max(0L, nrow(gene_counts_f) - 1L))
-    if (n_ctrl >= 1 && nrow(gene_counts_f) >= 2) {
-      controls <- pick_empirical_controls(gene_counts_f, design, n_ctrl)
-      pheno <- AnnotatedDataFrame(data.frame(
-        condition = cond_factor, row.names = samples))
-      set1 <- newSeqExpressionSet(counts = gene_counts_f, phenoData = pheno)
-      for (k in seq_len(k_max)) {
-        score <- list(power = NA, fpr = NA, tp = NA, fn = NA, fp = NA, tn = NA)
-        ruv_fit <- tryCatch(RUVg(set1, controls, k = k), error = function(e) NULL)
-        if (!is.null(ruv_fit)) {
-          W <- as.matrix(pData(ruv_fit)[, grep("^W_", colnames(pData(ruv_fit))),
-                                         drop = FALSE])
-          design_ruv <- model.matrix(~ W + cond_factor)
-          if (qr(design_ruv)$rank == ncol(design_ruv) &&
-              nrow(repeat_counts_f) >= 2) {
-            tt_ruv <- run_de(repeat_counts_f, design_ruv)
-            score <- score_calls(tt_ruv, de_repeat_features, fdr)
-          }
+    method_recovered <- list()
+    for (m in method_keys) {
+      tt <- tt_per_method[[m]]
+      if (is.null(tt)) {
+        method_scores[[m]] <- list(power = NA_real_, fpr = NA_real_,
+                                   tp = NA_integer_, fn = NA_integer_,
+                                   fp = NA_integer_, tn = NA_integer_)
+        if (record_recovered_logfc) {
+          method_recovered[[m]] <- recovered_logfc_table(
+            NULL, repeat_params$feature_id, repeat_logfc, repeat_plant$planted)
         }
-        method_scores[[paste0("RUVg_k", k)]] <- score
-      }
-    } else {
-      for (k in seq_len(k_max)) {
-        method_scores[[paste0("RUVg_k", k)]] <- list(
-          power = NA, fpr = NA, tp = NA, fn = NA, fp = NA, tn = NA)
+      } else {
+        method_scores[[m]] <- score_calls(tt, de_repeat_features, fdr)
+        if (record_recovered_logfc) {
+          method_recovered[[m]] <- recovered_logfc_table(
+            tt, repeat_params$feature_id, repeat_logfc, repeat_plant$planted)
+        }
       }
     }
 
-    iter_df <- do.call(rbind, lapply(names(method_scores), function(m) {
+    iter_df <- do.call(rbind, lapply(method_keys, function(m) {
       r <- method_scores[[m]]
       data.frame(method = m, iter = i,
                  power = r$power, fpr = r$fpr,
@@ -239,15 +449,34 @@ run_one_grid_cell <- function(gene_params, repeat_params, samples, condition,
                  stringsAsFactors = FALSE)
     }))
     iter_results[[i]] <- iter_df
+
+    if (record_recovered_logfc) {
+      rec_df <- do.call(rbind, lapply(method_keys, function(m) {
+        d <- method_recovered[[m]]
+        d$method <- m
+        d$iter <- i
+        d
+      }))
+      recovered_results[[i]] <- rec_df
+    }
   }
-  do.call(rbind, iter_results)
+  list(scores = do.call(rbind, iter_results),
+       recovered = if (record_recovered_logfc) do.call(rbind, recovered_results)
+                   else NULL,
+       planted_features = de_repeat_features,
+       planted_logfc = repeat_logfc[repeat_plant$idx])
 }
 
 
 run_grid <- function(gene_counts_path, repeat_counts_path, metadata,
                      gene_lib_grid, repeat_lib_grid, fc,
                      n_de_repeats, n_de_genes, sigma_w,
-                     n_controls, k_max, fdr, n_iter, seed) {
+                     n_controls, k_max, fdr, n_iter, seed,
+                     signed_fraction = 1.0,
+                     class_map_path = NULL,
+                     class_map_granularity = "family_id",
+                     class_weights = NULL,
+                     record_recovered_logfc = TRUE) {
   samples <- metadata$sample
   condition <- metadata$condition
   gene_mat <- load_count_matrix(gene_counts_path, samples)
@@ -257,29 +486,55 @@ run_grid <- function(gene_counts_path, repeat_counts_path, metadata,
   gene_params <- fit_nb_params(gene_mat, design)
   repeat_params <- fit_nb_params(repeat_mat, design)
 
+  repeat_class_id <- load_repeat_class_map(class_map_path,
+                                           repeat_params$feature_id,
+                                           granularity_column = class_map_granularity)
+  if (!is.null(class_weights) && is.null(repeat_class_id)) {
+    stop("class_weights set but class_map_path missing or empty")
+  }
+
   cells <- expand.grid(gene_lib_scale = gene_lib_grid,
                        repeat_lib_scale = repeat_lib_grid,
                        KEEP.OUT.ATTRS = FALSE)
   results <- vector("list", nrow(cells))
+  recovered <- vector("list", nrow(cells))
   for (ci in seq_len(nrow(cells))) {
     g <- cells$gene_lib_scale[ci]
     r <- cells$repeat_lib_scale[ci]
     cell_seed <- as.integer(seed) * 1000L + ci * 10L
     cat(sprintf("[grid %d/%d] gene_lib_scale=%g repeat_lib_scale=%g\n",
                 ci, nrow(cells), g, r))
-    df <- run_one_grid_cell(
+    cell_out <- run_one_grid_cell(
       gene_params, repeat_params, samples, condition,
       gene_lib_scale = g, repeat_lib_scale = r,
       fc = fc, n_de_repeats = n_de_repeats, n_de_genes = n_de_genes,
       sigma_w = sigma_w, n_controls = n_controls, k_max = k_max,
-      fdr = fdr, n_iter = n_iter, seed_base = cell_seed)
+      fdr = fdr, n_iter = n_iter, seed_base = cell_seed,
+      signed_fraction = signed_fraction,
+      repeat_class_id = repeat_class_id,
+      repeat_class_weights = class_weights,
+      record_recovered_logfc = record_recovered_logfc)
+    df <- cell_out$scores
     df$gene_lib_scale <- g
     df$repeat_lib_scale <- r
     results[[ci]] <- df
+    if (record_recovered_logfc && !is.null(cell_out$recovered)) {
+      rec <- cell_out$recovered
+      rec$gene_lib_scale <- g
+      rec$repeat_lib_scale <- r
+      if (!is.null(repeat_class_id)) {
+        rec$class_id <- repeat_class_id[match(rec$feature_id,
+                                              repeat_params$feature_id)]
+      }
+      recovered[[ci]] <- rec
+    }
   }
   list(results = do.call(rbind, results),
+       recovered = if (record_recovered_logfc) do.call(rbind, recovered)
+                   else NULL,
        gene_params = gene_params,
-       repeat_params = repeat_params)
+       repeat_params = repeat_params,
+       repeat_class_id = repeat_class_id)
 }
 
 
@@ -345,6 +600,21 @@ if (exists("snakemake")) {
       stringsAsFactors = FALSE)
   }
 
+  signed_fraction <- if (!is.null(params$signed_fraction))
+    as.numeric(params$signed_fraction) else 1.0
+  stopifnot(signed_fraction >= 0, signed_fraction <= 1)
+
+  class_map_path <- if (!is.null(params$class_map_path))
+    as.character(params$class_map_path) else ""
+  class_weights <- NULL
+  if (!is.null(params$class_weights) && length(params$class_weights) > 0) {
+    cw <- params$class_weights
+    if (is.list(cw)) cw <- unlist(cw)
+    stopifnot(is.numeric(cw), !is.null(names(cw)),
+              all(cw >= 0), any(cw > 0))
+    class_weights <- cw
+  }
+
   grid_out <- run_grid(
     gene_counts_path = gene_counts_path,
     repeat_counts_path = repeat_counts_path,
@@ -359,7 +629,13 @@ if (exists("snakemake")) {
     k_max = as.integer(params$k_max),
     fdr = as.numeric(params$fdr),
     n_iter = as.integer(params$n_iter),
-    seed = as.integer(params$seed))
+    seed = as.integer(params$seed),
+    signed_fraction = signed_fraction,
+    class_map_path = class_map_path,
+    class_map_granularity = if (!is.null(params$class_map_granularity))
+      as.character(params$class_map_granularity) else "family_id",
+    class_weights = class_weights,
+    record_recovered_logfc = TRUE)
 
   results <- grid_out$results
   summary_df <- summarize_grid(results)
@@ -368,10 +644,26 @@ if (exists("snakemake")) {
               sep = "\t", quote = FALSE, row.names = FALSE)
   write.table(summary_df, snakemake@output$summary_tsv,
               sep = "\t", quote = FALSE, row.names = FALSE)
+
+  if (!is.null(snakemake@output$recovered_logfc_tsv)) {
+    rec <- grid_out$recovered
+    stopifnot(!is.null(rec))
+    rec_path <- snakemake@output$recovered_logfc_tsv
+    if (grepl("\\.gz$", rec_path)) {
+      gz <- gzfile(rec_path, "w")
+      on.exit(close(gz), add = TRUE)
+      write.table(rec, gz, sep = "\t", quote = FALSE, row.names = FALSE)
+    } else {
+      write.table(rec, rec_path, sep = "\t", quote = FALSE, row.names = FALSE)
+    }
+  }
+
   saveRDS(list(results = results, summary = summary_df,
                metadata = metadata,
                gene_params = grid_out$gene_params,
                repeat_params = grid_out$repeat_params,
+               recovered = grid_out$recovered,
+               repeat_class_id = grid_out$repeat_class_id,
                params = as.list(params)),
           snakemake@output$results_rds)
 

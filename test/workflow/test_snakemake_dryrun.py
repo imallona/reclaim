@@ -144,3 +144,66 @@ def test_main_snakefile_lint():
     # lint may return non-zero for warnings; we only fail on errors
     # (lint output on stderr distinguishes errors from warnings)
     assert 'Error' not in r.stdout, f'Snakemake lint errors:\n{r.stdout}'
+
+
+# Tagcount coverage with explicit aligner overrides. The default sim
+# configs already include starsolo_tagcount; these tests pass an aligner
+# list via --config that drops bowtie2 and keeps tagcount, exercising
+# the code path where tagcount is the only opt-in extra.
+
+def run_dryrun_with_config(snakefile, configfile, extra_config,
+                           workdir=WORKFLOW_DIR):
+    cmd = [
+        'snakemake',
+        '-s', snakefile,
+        '--configfile', configfile,
+        '--config', extra_config,
+        '--dry-run',
+        '--cores', '1',
+        '--quiet',
+    ]
+    return subprocess.run(cmd, capture_output=True, text=True, cwd=workdir)
+
+
+@pytest.mark.workflow
+@SKIP_IF_NO_SNAKEMAKE
+def test_main_snakefile_dryrun_chromium_with_tagcount():
+    """Chromium sim with starsolo_tagcount opted in via --config: the
+    DAG should build, fan out tagcount jobs over repeat feature_sets only
+    (genes is served by STARsolo's matrix), and pull in the bam_index
+    rule."""
+    r = run_dryrun_with_config(
+        os.path.join(WORKFLOW_DIR, 'Snakefile'), CHROMIUM_CFG,
+        'aligners=["starsolo","kallisto","alevin","starsolo_tagcount"]')
+    assert r.returncode == 0, (
+        f'Dry-run failed for chromium + tagcount:\n{r.stderr}'
+    )
+
+
+@pytest.mark.workflow
+@SKIP_IF_NO_SNAKEMAKE
+def test_main_snakefile_dryrun_smartseq2_with_tagcount():
+    """SmartSeq2 sim with starsolo_tagcount opted in: routes through
+    smartseq2_tagcount.snmk and runs sc_count_features with --umi-dedup
+    none."""
+    r = run_dryrun_with_config(
+        os.path.join(WORKFLOW_DIR, 'Snakefile'), SMARTSEQ2_CFG,
+        'aligners=["starsolo","kallisto","alevin","starsolo_tagcount"]')
+    assert r.returncode == 0, (
+        f'Dry-run failed for smartseq2 + tagcount:\n{r.stderr}'
+    )
+
+
+@pytest.mark.workflow
+@SKIP_IF_NO_SNAKEMAKE
+def test_main_snakefile_dryrun_sc_real_with_tagcount():
+    """Real-data sc with sc_count_mode=tagcount switches starsolo_sc into
+    one-align-per-library + tagcount recount mode. Verifies the DAG
+    builds with the new bam_index include and the (genes, gene_id)
+    carve-out."""
+    r = run_dryrun_with_config(
+        os.path.join(WORKFLOW_DIR, 'Snakefile'), SC_GSE230647_CFG,
+        'sc_count_mode=tagcount')
+    assert r.returncode == 0, (
+        f'Dry-run failed for sc real-data + tagcount:\n{r.stderr}'
+    )

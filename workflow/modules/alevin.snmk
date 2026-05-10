@@ -6,9 +6,19 @@ SmartSeq2: salmon quant per cell (one run per cell FASTQ).
 Chromium:  salmon alevin with droplet chemistry flags.
 
 Both modes support {feature_set}: genes, repeats, genic_repeats, intergenic_repeats.
-Alevin always runs in unique-read mode (no multimapper_mode wildcard needed).
-For chromium, alevin uses a locus-level t2g (identity mapping) so normalisation
-can later aggregate to any granularity without re-running alignment.
+
+Multimapper handling (chromium only, via salmon alevin flag):
+  unique : default behaviour (alevin's built-in VBEM redistribution). The
+           label is kept as "unique" for back-compatibility with the
+           historical output layout. NB: this is NOT unique-mapper-only;
+           VBEM is alevin's analogue of EM and is the closest thing
+           alevin offers without --noem.
+  noem   : passes --noem; alevin reverts to a non-iterative count
+           assignment that approximates uniform multimapper distribution.
+
+For chromium, alevin uses a locus-level t2g (identity mapping) so
+normalisation can later aggregate to any granularity without re-running
+alignment.
 
 Bulk RNA-seq uses a separate salmon rule in modules/bulk_single.snmk or
 modules/bulk_paired.snmk.
@@ -31,6 +41,9 @@ _chem_map_sim = {(16, 10): '--chromium', (16, 12): '--chromiumV3'}
 _alevin_chem_flag = _chem_map_sim.get(
     (_alevin_cb_len, _alevin_umi_len),
     f'--end 5 --barcodeLength {_alevin_cb_len} --umiLength {_alevin_umi_len}')
+
+# Alevin mode-flag table.
+_alevin_mode_flag = {'unique': '', 'noem': '--noem'}
 
 
 rule salmon_quant_smartseq2_cell:
@@ -82,26 +95,31 @@ rule salmon_alevin_chromium:
         barcodes = _chromium_barcodes
     output:
         quants_mat = op.join(config['base'], 'alevin', '{feature_set}', 'chromium',
-                             'alevin', 'quants_mat.gz'),
+                             '{multimapper_mode}', 'alevin', 'quants_mat.gz'),
         quants_rows = op.join(config['base'], 'alevin', '{feature_set}', 'chromium',
-                              'alevin', 'quants_mat_rows.txt'),
+                              '{multimapper_mode}', 'alevin', 'quants_mat_rows.txt'),
         quants_cols = op.join(config['base'], 'alevin', '{feature_set}', 'chromium',
-                              'alevin', 'quants_mat_cols.txt'),
+                              '{multimapper_mode}', 'alevin', 'quants_mat_cols.txt'),
         quants_mtx = op.join(config['base'], 'alevin', '{feature_set}', 'chromium',
-                             'alevin', 'quants_mat.mtx.gz')
+                             '{multimapper_mode}', 'alevin', 'quants_mat.mtx.gz')
     wildcard_constraints:
-        feature_set = 'genes|repeats|genic_repeats|intergenic_repeats'
+        feature_set = 'genes|repeats|genic_repeats|intergenic_repeats',
+        multimapper_mode = 'unique|noem'
     params:
-        outdir = op.join(config['base'], 'alevin', '{feature_set}', 'chromium'),
+        outdir = op.join(config['base'], 'alevin', '{feature_set}', 'chromium',
+                         '{multimapper_mode}'),
         index_dir = lambda wc: op.join(config['indices_base'], 'indices', genome_tag,
                                        f'salmon_{wc.feature_set}'),
         chem_flag = _alevin_chem_flag,
         whitelist_arg = lambda wc, input: f'--whitelist {input.barcodes}' if input.barcodes else '',
+        mode_flag = lambda wc: _alevin_mode_flag[wc.multimapper_mode],
         extra_args = config.get('aligner_params', {}).get('alevin', {}).get('extra_args', '')
     log:
-        op.join(config['base'], 'logs', 'salmon_{feature_set}_alevin_chromium.log')
+        op.join(config['base'], 'logs',
+                'salmon_{feature_set}_alevin_chromium_{multimapper_mode}.log')
     benchmark:
-        op.join(config['base'], 'benchmarks', 'salmon_{feature_set}_alevin_chromium.txt')
+        op.join(config['base'], 'benchmarks',
+                'salmon_{feature_set}_alevin_chromium_{multimapper_mode}.txt')
     threads: workflow.cores
     resources:
         mem_mb = config['resources']['max_mem_mb']
@@ -118,5 +136,6 @@ rule salmon_alevin_chromium:
             --threads {threads} \
             --output {params.outdir} \
             --dumpMtx \
+            {params.mode_flag} \
             {params.extra_args} 2> {log}
         """

@@ -1,0 +1,78 @@
+## Coordinated-derepression scenario for the count-level DE benchmark.
+## Mirrors the TDP-43 overexpression biology: a large fraction of repeat
+## subfamilies all move up together. This breaks the "most features not DE"
+## assumption that TMM-on-repeats relies on, so TMM size factors absorb part
+## of the biological signal and the recovered logFC is compressed. Gene-
+## library-size transfer (size factors fit on the gene matrix, where the
+## assumption still holds) is unbiased; this config produces the comparison.
+##
+## Reuses the same input gene and repeat count TSVs as
+## de_simulations_polymenidou_bulk.yaml. The only differences are in the DE
+## planting parameters (large fraction, all positive, biology-weighted by
+## class) and the smaller library-scale grid since this scenario is about
+## the recovered-logFC bias, not the depth power curve.
+
+base: "../results/de_simulations_coordinated_derepression"
+indices_base: "../results/shared"
+
+pipeline_type: de_simulation
+
+reference:
+  genome_fasta: "../results/shared/refs/GRCh38.dna.primary_assembly.fa.gz"
+  repeats_gtf: "../results/shared/refs/hg38_rmsk_TE.gtf.gz"
+
+aligners: [star]
+
+resources:
+  max_threads: 2
+  max_mem_mb: 8000
+
+de_simulation:
+  gene_counts: "../results/gse230647_bulk/counts/star_genes_gene_id_unique.tsv"
+  repeat_counts: "../results/gse230647_bulk/counts/star_repeats_family_id_unique.tsv"
+  metadata: ""
+  sample_column: sample
+  condition_column: condition
+
+  ## Planted DE: large fraction of repeats move in the same direction.
+  ## With ~1200 family-level subfamilies the default n_de_repeats: 600 is
+  ## ~50% of the matrix. signed_fraction: 1.0 means all picked features go
+  ## up. fc kept at 3 to match the default scenario; the bias slope is
+  ## measured at fc, not as a function of fc.
+  fc: 3
+  n_de_repeats: 600
+  signed_fraction: 1.0
+  n_de_genes: 1000
+
+  ## Biology-weighted feature selection: bias toward young polyA-competent
+  ## retrotransposons, the families documented to derepress under TDP-43
+  ## loss. Weights are class-level. The class_map_path consumes the
+  ## existing 4-column locus_map directly; class_map_granularity tells the
+  ## R helper which column to roll up by (must match the granularity of
+  ## repeat_counts above; here, family_id). Set class_map_path: "" to
+  ## disable biology weighting (uniform random).
+  class_map_path: "../results/shared/indices/all/repeats_locus_map.tsv"
+  class_map_granularity: "family_id"
+  class_weights:
+    LINE: 3
+    SINE: 3
+    LTR: 3
+    Retroposon: 2
+    DNA: 1
+    Satellite: 1
+    Simple_repeat: 0
+    Low_complexity: 0
+    Unknown: 0
+
+  ## Smaller library-scale grid: bias estimation is at the realised depth,
+  ## not a depth sweep. Three points are enough to confirm the bias is not
+  ## a depth artifact.
+  gene_lib_grid: [0.5, 1, 2]
+  repeat_lib_grid: [0.5, 1, 2]
+
+  sigma_w: 0.5
+  k_max: 2
+  n_controls: 200
+  n_iter: 30
+  fdr: 0.05
+  seed: 1234

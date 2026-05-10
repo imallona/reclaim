@@ -38,14 +38,31 @@ rule starsolo_chromium_sc:
         multi_bam = op.join(config['base'], 'starsolo', '{sample_id}',
                             'multi_{feature_set}',
                             'Aligned.sortedByCoord.out.bam'),
-        unique_raw_dir = directory(op.join(config['base'], 'starsolo',
+        unique_matrix = op.join(config['base'], 'starsolo', '{sample_id}',
+                                'unique_{feature_set}', 'Solo.out', 'Gene',
+                                'raw', 'matrix.mtx'),
+        unique_barcodes = op.join(config['base'], 'starsolo', '{sample_id}',
+                                  'unique_{feature_set}', 'Solo.out', 'Gene',
+                                  'raw', 'barcodes.tsv'),
+        unique_features = op.join(config['base'], 'starsolo', '{sample_id}',
+                                  'unique_{feature_set}', 'Solo.out', 'Gene',
+                                  'raw', 'features.tsv'),
+        multi_matrix = op.join(config['base'], 'starsolo', '{sample_id}',
+                               'multi_{feature_set}', 'Solo.out', 'Gene',
+                               'raw', 'UniqueAndMult-EM.mtx'),
+        multi_barcodes = op.join(config['base'], 'starsolo', '{sample_id}',
+                                 'multi_{feature_set}', 'Solo.out', 'Gene',
+                                 'raw', 'barcodes.tsv'),
+        multi_features = op.join(config['base'], 'starsolo', '{sample_id}',
+                                 'multi_{feature_set}', 'Solo.out', 'Gene',
+                                 'raw', 'features.tsv'),
+        # filtered/barcodes.tsv is the EmptyDrops_CR-passed cell list when
+        # feature_set == genes; an empty placeholder for repeat
+        # feature_sets (where filtering on repeat counts is unreliable).
+        unique_filtered_barcodes = op.join(config['base'], 'starsolo',
                                            '{sample_id}',
-                                           'unique_{feature_set}',
-                                           'Solo.out', 'Gene', 'raw')),
-        multi_raw_dir = directory(op.join(config['base'], 'starsolo',
-                                          '{sample_id}',
-                                          'multi_{feature_set}',
-                                          'Solo.out', 'Gene', 'raw')),
+                                           'unique_{feature_set}', 'Solo.out',
+                                           'Gene', 'filtered', 'barcodes.tsv'),
         unique_log_final = op.join(config['base'], 'starsolo', '{sample_id}',
                                    'unique_{feature_set}', 'Log.final.out'),
     params:
@@ -62,6 +79,13 @@ rule starsolo_chromium_sc:
         umi_start = _umi_start,
         cdna_csv = lambda wc, input: ','.join(input.cdna),
         cb_csv = lambda wc, input: ','.join(input.cb),
+        # EmptyDrops_CR for genes; STARsolo applies its own defaults for
+        # the algorithm parameters. None for repeat feature_sets, where
+        # cell filtering on a repeat-only count distribution would be
+        # noise-dominated (no real knee).
+        solo_cell_filter = lambda wc: ('EmptyDrops_CR'
+                                        if wc.feature_set == 'genes'
+                                        else 'None'),
         extra_args = config.get('aligner_params', {}).get('starsolo', {}).get('extra_args', ''),
     log:
         op.join(config['base'], 'logs',
@@ -69,7 +93,7 @@ rule starsolo_chromium_sc:
     benchmark:
         op.join(config['base'], 'benchmarks',
                 'starsolo_{sample_id}_{feature_set}.txt'),
-    threads: workflow.cores
+    threads: min(workflow.cores, config.get('resources', {}).get('starsolo_threads', 14))
     resources:
         mem_mb = config['resources']['max_mem_mb']
     shell:
@@ -88,7 +112,7 @@ rule starsolo_chromium_sc:
              --sjdbGTFfile {input.gtf} \
              --soloFeatures Gene \
              --soloCBwhitelist None \
-             --soloCellFilter None \
+             --soloCellFilter {params.solo_cell_filter} \
              --soloCBstart 1 --soloCBlen {params.cb_len} \
              --soloUMIstart {params.umi_start} \
              --soloUMIlen {params.umi_len} \
@@ -97,6 +121,14 @@ rule starsolo_chromium_sc:
              --outSAMtype BAM SortedByCoordinate \
              --limitBAMsortRAM {params.max_ram_bytes} \
              {params.extra_args} 2> {log}
+
+        # STARsolo skips the filtered/ dir when soloCellFilter is None, so
+        # for non-genes feature_sets we touch an empty placeholder to
+        # satisfy the snakemake output declaration.
+        mkdir -p {params.unique_outdir}Solo.out/Gene/filtered
+        if [ ! -f {params.unique_outdir}Solo.out/Gene/filtered/barcodes.tsv ]; then
+            touch {params.unique_outdir}Solo.out/Gene/filtered/barcodes.tsv
+        fi
 
         mkdir -p {params.multi_outdir}Solo.out/Gene/raw
         cp -af {params.unique_outdir}Solo.out/Gene/raw/features.tsv \

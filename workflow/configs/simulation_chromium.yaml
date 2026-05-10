@@ -41,14 +41,17 @@ aligners:
   - kallisto
   - alevin
   - bowtie2
+  - starsolo_tagcount
 
 aligner_params:
   starsolo:
     multimapper_modes: ["unique", "multi"]
     extra_args: ""
   kallisto:
+    multimapper_modes: ["unique", "em"]
     extra_args: ""
   alevin:
+    multimapper_modes: ["unique", "noem"]
     extra_args: ""
   bowtie2:
     multimapper_modes: ["unique", "multi"]

@@ -59,6 +59,25 @@ The `granularities` config key specifies which levels to compute.  Ground truth 
 
 STAR 2.7+ runs in SmartSeq (`soloType SmartSeq`) or Chromium (`soloType CB_UMI_Simple`) mode. A custom `sjdbGTFfile` selects the repeat or gene annotation. Multimapper handling is controlled by `--soloMultiMappers`: `Unique` (only uniquely mapping reads contribute) or `EM` (multimapping reads distributed by the EM algorithm). Both modes are evaluated for all technologies.
 
+For sc Chromium specifically, the alignment+counting architecture is configurable via the top-level config flag `sc_count_mode`. The two modes differ in how the per-feature_set count matrices are produced from the same fastqs. The yaml is the single source of truth: the default `all` rule reads `sc_count_mode` and routes to the right outputs, so no special target on the snakemake CLI is required.
+
+`sc_count_mode: per_featureset` (default; backward-compatible). One STARsolo run per `(sample, feature_set)`; `--sjdbGTFfile` is the feature_set's own GTF; `--soloFeatures Gene` emits the count matrix natively. Multi mode uses STARsolo's iterative `EM` redistribution. Outputs land at `<base>/starsolo/<sample>/<mode>_<feature_set>/`.
+
+`sc_count_mode: tagcount`. One STARsolo run per library, aligned with `genes.gtf` for splice junctions and gene counting. The resulting BAM (with `CB` and `UB` tags for Chromium, `CB` only for SmartSeq2) is then re-counted by `workflow/scripts/sc_count_features.py` against each repeat feature_set GTF. This avoids three independent STAR alignments per library, and splice junctions are inferred from the gene model only (not from repeat GTFs, which would otherwise inject spurious junctions). The recount is constrained to repeat feature_sets (`repeats`, `genic_repeats`, `intergenic_repeats`); at `(genes, gene_id)` STARsolo's own `Solo.out/Gene/{filtered,raw}/matrix.mtx` is canonical and re-counting there would duplicate work. Outputs land at `<base>/starsolo_tagcount/<sample>/<mode>_<feature_set>/` so they coexist on disk with `per_featureset` results from sibling yamls and don't trigger downstream rebuilds.
+
+The same recount path serves both Chromium and SmartSeq2 simulations through two technology-specific modules. `starsolo_tagcount.snmk` handles Chromium: the BAM carries real UMIs in `UB`, the script runs with `--umi-dedup 1mm_all` (default) or `exact`, and the whitelist is the EmptyDrops_CR-passed `Solo.out/Gene/filtered/barcodes.tsv` for real-data sc, or `raw/barcodes.tsv` for simulations (which run `--soloCellFilter None`). `smartseq2_tagcount.snmk` handles SmartSeq2: STARsolo SmartSeq2 emits one BAM per library where each read carries `CB` from the manifest cell-id (no `UB`, no real UMIs); the script runs with `--umi-dedup none`, the whitelist is `raw/barcodes.tsv` (= manifest cell list). The shared BAI rule lives in `bam_index.snmk` so both technologies depend on the same indexer.
+
+The recount script `sc_count_features.py` is the load-bearing piece in `tagcount` mode. Its design choices, exposed as CLI flags and configurable from the workflow config:
+
+- Indexing level. The GTF is parsed at the broadest available feature_type (gene > transcript > exon). Gene-level indexing means a read sitting in an intron still counts toward its parent gene, mirroring STARsolo's `GeneFull` semantics. Repeat GTFs use exon-only entries (one exon per repeat locus) so the entire repeat span is covered by definition.
+- Cell barcode whitelist. Restricting to the CBs that STARsolo's gene-counting pass already retained avoids the multi-million-row unfiltered all-CB matrix and aligns the repeat counts with the same set of "real cells" used for genes.
+- UMI deduplication (`--umi-dedup`). `1mm_all` is the default and matches STARsolo's `--soloUMIdedup 1MM_All`: per `(CB, gene_id)`, UMIs within Hamming-1 of each other collapse via union-find before counting. `exact` counts distinct UB strings without collapsing and is for debugging only and systematically over-counts unique molecules by ~2-5% because sequencing errors create spurious UMIs. `none` skips UMI bucketing entirely: each BAM record is keyed by a per-record synthetic UB (`(qname, ref_start)`) so every record contributes its weight (1.0 in unique mode, 1/NH in multi mode). This is the SmartSeq2 path: with no real UMIs, no honest collapsing is possible, so every BAM record contributes one count. For paired-end SmartSeq2 BAMs, only R1 is counted (the script skips records with `is_paired` and `is_read2` set) so a fragment is not double-counted across its two ends. Without UMIs the pipeline does not attempt any duplicate removal: in RNA-seq it is impossible to tell technical PCR duplicates from coincident, biologically real reads at the same coordinates without a molecular barcode.
+- Multimapper handling (`--multimapper`). `unique` skips `NH > 1` reads and is identical to STARsolo's `Unique`. `multi` includes `NH > 1` reads with weight `1/NH` per alignment record. This is non-iterative and linear-cost, unlike STARsolo's `--soloMultiMappers EM` which iterates a redistribution step. The two definitions differ systematically: EM concentrates weight on genes with strong unique-mapper support, `1/NH` spreads it uniformly across the candidate loci. For repeat-family quantification the uniform spread is the more conservative choice and is widely used in tools like RSEM (no-EM) and scTE.
+- Granularity outputs. When the GTF carries `family_id` and/or `class_id` attributes (the repeat GTFs do; Ensembl genes do not), the script emits per-granularity matrices alongside the gene_id matrix, at `Solo.out/Gene_family_id/raw/` and `Solo.out/Gene_class_id/raw/`. The rollup is post-UMI-dedup at the gene_id level.
+- Parallelism. One worker per BAM contig; each worker holds its own pysam handle (handles are not fork-safe) and processes one chromosome. Memory is dominated by the per-key UMI dedup state and stays under 1 GB for typical 10x libraries.
+
+Unit tests in `test/unit/test_sc_count_features.py` cover, against synthetic GTFs and BAMs: exonic vs intronic counting, multi-feature ambiguity, missing CB/UB tags, off-whitelist barcodes, multimapper handling, UMI dedup at exact, Hamming-1, and `none` mode (SmartSeq2 path: counts every record, distributes multi-mappers across loci, still applies the whitelist), and family/class rollups. In unique mode with `1mm_all` dedup, the recount is expected to agree exactly with STARsolo's gene matrix produced from the same BAM; the comparison Rmd asserts this as a regression check before the project relies on the recount in production.
+
 ### Kallisto
 
 For SmartSeq2 (simulation) and bulk single-end, `kallisto quant` runs per sample against a repeat-sequence pseudo-transcriptome. Single-end bulk passes `--single --fragment-length --sd`. Fragment length and standard deviation are set via `real_data.fragment_length` and `real_data.fragment_sd` (defaults 200 and 20). Per-sample `abundance.tsv` files are merged and aggregated at the requested granularity.
@@ -79,6 +98,8 @@ For 10x Chromium, `salmon alevin` is run in Chromium v3 mode using the repeat ps
 
 Bowtie2 is indexed against a pseudo-genome FASTA where each repeat locus is its own reference sequence, named `transcript_id::chrom:start-end(strand)`. Reads align with `bowtie2 -a` (all alignments). Per-locus counts come from `samtools idxstats`, which counts alignments per reference without coordinate lookup.
 
+This pseudo-genome layout is the reason bowtie2 cannot be migrated onto the `sc_count_features.py` tagcount path that Chromium and SmartSeq2 STAR alignments use. Tagcount maps an alignment's `(chrom, ref_start)` to a feature interval in a real-genome GTF; a bowtie2 BAM has its references in pseudo-genome space (one contig per repeat locus), so a real-genome GTF lookup is meaningless. Bowtie2 keeps its own counting path: `samtools idxstats` for the repeat granularities and featureCounts (cell-chunked, GTF-chunked) for the genes feature_set in SmartSeq2.
+
 For SmartSeq2, one BAM is produced per cell; featureCounts is then run on configurable cell chunks to limit peak memory.
 
 For 10x Chromium, read 2 (cDNA) aligns to the repeat index. Cell barcode and UMI tags from read 1 are attached via `umi_tools extract`. UMI deduplication runs via `umi_tools dedup` before counting.
@@ -90,6 +111,20 @@ Each aligner's native output is converted to a common feature x cell TSV (rows =
 For 10x Chromium, kallisto and alevin normalization uses sparse accumulators. Only non-zero `{cell_index: count}` pairs are stored per feature group. Memory stays proportional to expressed pairs rather than O(features x cells).
 
 The bowtie2 Chromium counting script streams the CB-tagged deduplicated BAM once via `samtools view`, accumulating `(barcode, feature)` counts in a sparse dict without per-cell BAM splitting.
+
+### Repeat differential expression: TMM, gene_lib, and RUVg
+
+Differential expression on the repeat count matrix is run with edgeR's quasi-likelihood (`glmQLFit` + `glmQLFTest`). Three normalization paths are available and reported side by side in the count-level benchmark and in the paper-side reports:
+
+- **TMM on repeats**: `calcNormFactors(method = "TMM")` fit on the repeat matrix. The standard practice. Assumes most repeat subfamilies are not differentially expressed; when this assumption holds, TMM is unbiased.
+- **gene_lib transfer**: `calcNormFactors(method = "TMM")` fit on the *gene* matrix, then transferred to the repeat DGEList by setting `lib.size` and `norm.factors` from the gene fit. The repeat matrix never sees its own size factors. Used when many repeats co-move and the "most features not DE" assumption is suspect (the gene matrix still satisfies it). See `workflow/scripts/gene_lib_size_common.R::run_gene_lib_repeat_de`.
+- **RUVg(k)**: empirical controls picked from the gene matrix as the least-significant genes under a naive F-test on TMM-normalized gene counts; `RUVg(set, controls, k)` fits k unwanted-variation factors W; the repeat DE design becomes `~ W + group` (or `~ sample_block + W + group`). See `workflow/scripts/ruv_common.R`.
+
+The count-level benchmark module exercises all three (plus a `none` path with `norm.factors = 1` as a lower bound) and exposes recovered logFC per planted feature so a bias slope can be computed per method.
+
+### Coordinated-derepression scenario
+
+The default count-level scenario (`workflow/configs/de_simulations_polymenidou_bulk.yaml`) plants a small, mixed-direction set of DE repeats: TMM is in its happy regime and the metric of interest is power across the depth grid. The coordinated-derepression scenario (`workflow/configs/de_simulations_coordinated_derepression.yaml`) plants a large, same-sign set of DE repeats with class-weighted selection biased toward young polyA-competent retrotransposons (LINE, SINE, LTR, Retroposon). It mirrors the TDP-43 overexpression biology and is the controlled test of the TMM-compression claim. Recovered logFC is exported per (method, feature, replicate, grid cell) to `de_simulations_recovered_logfc.tsv.gz` and the report Rmd computes per-method bias slopes (recovered ~ planted) at the canonical depth cell. See `docs/de_simulations.md` for the full parameter set.
 
 ## Evaluation
 
@@ -107,6 +142,24 @@ The `aggregate_global_metrics` rule concatenates all per-aligner global metric T
 
 An HTML report (`evaluation_report.html`) is rendered by `evaluation_report.Rmd` using `rmarkdown::render` with ggplot2 + patchwork. The report also writes paper-ready CSV tables to `{eval_dir}/paper_csv/`: `global_metrics_long.csv` (tidy long format), `global_metrics_wide.csv`, `aligner_ranking_per_metric.csv` (rank per feature_set x granularity x metric, direction-aware), `best_aligner_per_metric.csv` (best, second, delta), `per_cell_metrics_summary.csv` (n, mean, median, sd, q25, q75 per aligner x granularity x feature_set), `per_class_metrics.csv`, and `resources_wide.csv`.
 
+### External tool benchmark
+
+When `external_benchmark: true` is set in a simulation config, an additional module (`workflow/modules/external_tools_benchmark.snmk`) runs published repeat-quantification tools on the same simulation BAMs and ground truth as REclaim and scores them through the same `evaluate.py`. Tool coverage:
+
+| Tool | Modality | Native granularity | Conda env |
+|---|---|---|---|
+| TEtranscripts (TEcount) | bulk | gene_id (subfamily) | `workflow/envs/tetranscripts.yaml` (TEtranscripts 2.2.3) |
+| scTE | single cell | family_id | `workflow/envs/scte.yaml` (scTE 1.0.0) |
+| SQuIRE | bulk (optional) | locus | `workflow/envs/squire.yaml` (SQuIRE 0.9.9.92) |
+
+Per tool, three rules produce the final accuracy table:
+
+1. `run_<tool>` invokes the upstream tool. TEcount runs once per simulated SmartSeq2 cell; scTE runs once on the multi-cell Chromium BAM. Outputs land under `{base}/external_benchmark/{tool}/raw/`.
+2. `harmonize_external` calls `workflow/scripts/harmonize_external_counts.py` to convert the tool's native output to the REclaim feature x cell TSV format. The harmoniser asserts that at least `external_min_overlap_fraction` of the tool's feature IDs map to a known REclaim feature in the locus_map.
+3. `score_external_benchmark` runs the same `evaluate.py` used for REclaim's own quantifiers, with the same locus_map and granularity contracts.
+
+The render rule reads `summary_global_metrics.tsv` from both `external_benchmark/` and `evaluation/` and produces side-by-side accuracy bars per quantifier, granularity, and class. REdiscoverTE is not included; rationale in `docs/external_tool_benchmark.md`.
+
 A separate noise sweep report (`noise_sweep_report.Rmd`) loads `summary_global_metrics.tsv` from each noise-level run and plots metric degradation as a function of mutation rate. It writes paper-ready CSV tables to `{csv_outdir}/paper_csv/` (by default the directory of the HTML output): `noise_metrics_long.csv`, `noise_metrics_wide.csv` (columns per mutation rate), `noise_degradation_slopes.csv` (linear fit `value ~ mutation_rate` with slope, intercept, R^2, n_points per aligner x feature_set x granularity x metric), `noise_robustness_ranking.csv` (ranks aligners by shallowest slope for accuracy metrics), `per_cell_noise_summary.csv`, and `per_class_noise_metrics.csv`.
 
 ## Conda environments
@@ -122,6 +175,9 @@ A separate noise sweep report (`noise_sweep_report.Rmd`) loads `summary_global_m
 | rmarkdown   | envs/rmarkdown.yaml  | R, rmarkdown, ggplot2, patchwork          |
 | edger       | envs/edger.yaml      | R, edgeR, rmarkdown, ggplot2              |
 | ruvseq      | paper/envs/ruvseq.yaml | R, edgeR, RUVSeq, EDASeq, rmarkdown     |
+| tetranscripts | envs/tetranscripts.yaml | TEtranscripts 2.2.3, samtools         |
+| scte        | envs/scte.yaml       | scTE 1.0.0, anndata, h5py                 |
+| squire      | envs/squire.yaml     | SQuIRE 0.9.9.92 (Python 3.6, STAR 2.5.3a) |
 
 ## Paper analyses
 

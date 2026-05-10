@@ -24,10 +24,6 @@ library(scales)
 library(patchwork)
 source(file.path("scripts", "ggtheme.R"))
 
-make_palette <- function(n) {
-  if (n <= 8)  return(cbbPalette[seq_len(n)])
-  colorRampPalette(cbbPalette)(n)
-}
 
 eval_dirs <- strsplit(params$eval_dirs, ",")[[1]]
 eval_dirs <- trimws(eval_dirs)
@@ -124,15 +120,13 @@ deg <- global %>%
   filter(!is.na(value)) %>%
   mutate(metric = factor(metric, levels = acc_metrics))
 
-n_al <- length(unique(deg$aligner_mode))
-pal  <- make_palette(n_al)
 
 ggplot(deg, aes(x = mutation_rate, y = value,
                 colour = aligner_mode, group = aligner_mode)) +
   geom_point(size = 2.5, alpha = 0.85) +
   geom_line(linewidth = 0.6) +
   facet_grid(metric ~ feature_set + gran_label, scales = "free_y") +
-  scale_colour_manual(values = pal, name = "aligner (mode)") +
+  scale_colour_aligner_mode(name = "aligner (mode)") +
   scale_x_continuous(labels = percent_format(accuracy = 0.1)) +
   labs(x = "mutation rate", y = NULL,
        title = "metric degradation with increasing noise",
@@ -148,30 +142,35 @@ ggplot(deg, aes(x = mutation_rate, y = value,
 
 Summary view focusing on the two most interpretable metrics.
 
-```{r overview-two-metrics, fig.height=5, fig.width=7}
+```{r overview-two-metrics, fig.height=6, fig.width=14}
 ov <- global %>%
   filter(!is.na(mutation_rate)) %>%
   select(aligner_mode, feature_set, gran_label, mutation_rate, pearson_r, f1) %>%
   pivot_longer(c(pearson_r, f1), names_to = "metric", values_to = "value") %>%
   filter(!is.na(value))
 
-n_al2 <- length(unique(ov$aligner_mode))
-pal2  <- make_palette(n_al2)
+eps <- 1e-3
+logit_clip <- scales::trans_new(
+  "logit_clip",
+  transform = function(x) { x <- pmin(pmax(x, eps), 1 - eps); log(x / (1 - x)) },
+  inverse   = function(y) 1 / (1 + exp(-y)),
+  breaks    = function(lim) c(0.5, 0.8, 0.9, 0.95, 0.99, 0.999),
+  format    = function(b) format(b, drop0trailing = TRUE))
 
 ggplot(ov, aes(x = mutation_rate, y = value,
-               colour = aligner_mode, group = aligner_mode)) +
-  geom_point(size = 3, alpha = 0.85) +
-  geom_line(linewidth = 0.8) +
-  facet_grid(metric ~ feature_set, scales = "free_y") +
-  scale_colour_manual(values = pal2, name = "aligner (mode)") +
+               colour = aligner_mode,
+               group = aligner_mode)) +
+  geom_line(linewidth = 0.7, alpha = 0.9) +
+  geom_point(size = 2.2, alpha = 0.95) +
+  facet_grid(metric ~ feature_set + gran_label, scales = "free_y") +
+  scale_colour_aligner_mode() +
   scale_x_continuous(labels = percent_format(accuracy = 0.1)) +
-  ylim(0, 1) +
+  scale_y_continuous(trans = logit_clip) +
   labs(x = "mutation rate", y = NULL,
        title = "Pearson r and F1 across noise levels",
-       subtitle = "rows = metric, columns = feature_set; lines connect same aligner across mutation rates") +
+       subtitle = "colour = aligner_mode; columns = feature_set x granularity; y on logit scale") +
   theme_ng() +
-  theme(axis.text.x = element_text(angle = 25, hjust = 1),
-        legend.position = "bottom")
+  theme(legend.position = "bottom", legend.box = "vertical")
 ```
 
 ## global accuracy metrics per noise level
@@ -190,15 +189,13 @@ full_long <- global %>%
   filter(!is.na(value)) %>%
   mutate(metric = factor(metric, levels = full_metrics))
 
-n_al3 <- length(unique(full_long$aligner_mode))
-pal3  <- make_palette(n_al3)
 
 ggplot(full_long, aes(x = gran_label, y = value,
                       colour = aligner_mode, group = aligner_mode)) +
   geom_point(size = 2, alpha = 0.8) +
   geom_line(linetype = "dashed", linewidth = 0.5) +
   facet_grid(metric ~ noise_label + feature_set, scales = "free_y") +
-  scale_colour_manual(values = pal3, name = "aligner (mode)") +
+  scale_colour_aligner_mode(name = "aligner (mode)") +
   labs(x = "granularity", y = NULL,
        title = "global accuracy metrics",
        subtitle = "rows = metric; columns = mutation rate x feature_set; x = granularity") +
@@ -230,14 +227,12 @@ if (!is.null(per_cell) && nrow(per_cell) > 0 && "mutation_rate" %in% names(per_c
     pivot_longer(c(pearson_r, spearman_r), names_to = "metric", values_to = "r") %>%
     filter(!is.na(r))
 
-  n_al4 <- length(unique(pc_long$aligner_mode))
-  pal4  <- make_palette(n_al4)
 
   ggplot(pc_long, aes(x = aligner_mode, y = r, fill = aligner_mode)) +
     geom_violin(alpha = 0.7, draw_quantiles = c(0.25, 0.5, 0.75)) +
     geom_jitter(width = 0.1, size = 0.5, alpha = 0.4) +
     facet_grid(metric + gran_label ~ noise_label + feature_set) +
-    scale_fill_manual(values = pal4) +
+    scale_fill_aligner_mode(guide = "none") +
     labs(x = NULL, y = "correlation",
          title = "per-cell correlations by noise level",
          subtitle = "rows = metric x granularity; columns = mutation rate x feature_set") +
@@ -262,8 +257,6 @@ if (!is.null(per_family) && nrow(per_family) > 0 &&
                                 levels = c("locus", "gene_id", "family_id", "class_id")),
            noise_label = paste0(mutation_rate * 100, "%"))
 
-  n_al5 <- length(unique(pf$aligner_mode))
-  pal5  <- make_palette(n_al5)
 
   p_f1 <- ggplot(pf, aes(x = class_id, y = f1,
                           colour = aligner_mode, group = aligner_mode)) +
@@ -271,7 +264,7 @@ if (!is.null(per_family) && nrow(per_family) > 0 &&
     geom_point(size = 1.5, alpha = 0.85) +
     facet_grid(gran_label ~ noise_label + feature_set) +
     scale_y_sqrt() +
-    scale_colour_manual(values = pal5, name = "Aligner (mode)") +
+    scale_colour_aligner_mode(name = "Aligner (mode)") +
     labs(x = "repeat class", y = "F1",
          title = "F1 per repeat class by noise level",
          subtitle = "rows = granularity; columns = mutation rate x feature_set") +
@@ -287,7 +280,7 @@ if (!is.null(per_family) && nrow(per_family) > 0 &&
     geom_point(size = 1.5, alpha = 0.85) +
     facet_grid(gran_label ~ noise_label + feature_set) +
     scale_y_sqrt() +
-    scale_colour_manual(values = pal5, name = "Aligner (mode)") +
+    scale_colour_aligner_mode(name = "Aligner (mode)") +
     labs(x = "repeat class", y = "pearson r") +
     theme_ng() +
     theme(axis.text.x  = element_text(angle = 40, hjust = 1, size = 7),

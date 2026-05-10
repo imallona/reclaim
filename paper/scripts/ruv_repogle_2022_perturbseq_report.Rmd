@@ -13,6 +13,7 @@ params:
   selected_perturbations: "."
   alignment_qc: "."
   starsolo_base: "."
+  starsolo_tagcount_base: ""    # optional; when non-empty the tagcount comparison panel is rendered
   indices_base: "."
   report_outdir: "."
   feature_sets: "genes genic_repeats intergenic_repeats"
@@ -504,6 +505,93 @@ ggplot(validation %>% filter(!is.na(replogle_te_ratio)),
   labs(x = "Replogle TE_ratio (bulk h5ad)",
        y = "REclaim TE_total_fraction (per-perturbation pseudobulk sum)") +
   theme_ng()
+```
+
+## Tagcount vs STARsolo (when both are present)
+
+When the workflow ran with `sc_count_mode: tagcount` in addition to the default per_featureset path, the per-perturbation TE_total_fraction can be recomputed from the tagcount matrices and compared directly. Identity in unique mode is a regression check on `sc_count_features.py`; the multi-mode delta exposes the EM-vs-1/NH bias against this paper-side validation target. The chunk is skipped silently when `starsolo_tagcount_base` is empty.
+
+```{r tagcount-comparison, fig.width = 7, fig.height = 4}
+tagcount_starsolo_base <- params$starsolo_tagcount_base
+if (nzchar(tagcount_starsolo_base) && dir.exists(tagcount_starsolo_base)) {
+  load_starsolo_matrix_at <- function(base, library, mode, feature_set) {
+    mtx_dir <- file.path(base, library,
+                         paste0(mode, "_", feature_set),
+                         "Solo.out", "Gene", "raw")
+    if (!dir.exists(mtx_dir)) return(NULL)
+    em_path <- file.path(mtx_dir, "UniqueAndMult-EM.mtx")
+    mtx_path <- if (mode == "multi" && file.exists(em_path)) em_path else
+      file.path(mtx_dir, "matrix.mtx")
+    if (!file.exists(mtx_path)) return(NULL)
+    m <- readMM(mtx_path)
+    features <- read.table(file.path(mtx_dir, "features.tsv"), sep = "\t",
+                           header = FALSE, stringsAsFactors = FALSE,
+                           quote = "", comment.char = "")$V1
+    barcodes <- readLines(file.path(mtx_dir, "barcodes.tsv"))
+    rownames(m) <- features
+    colnames(m) <- barcodes
+    m
+  }
+
+  build_tagcount_pseudobulks <- function(mode, feature_set) {
+    parts <- list()
+    for (gg in sort(unique(cells$gem_group))) {
+      library_id <- paste0("KD6_", gg, "_essential")
+      m <- load_starsolo_matrix_at(tagcount_starsolo_base, library_id,
+                                    mode, feature_set)
+      if (is.null(m)) next
+      lib_cells <- cells[cells$gem_group == gg, ]
+      bc_strip <- sub("-[0-9]+$", "", lib_cells$cell_barcode)
+      idx <- match(bc_strip, colnames(m))
+      ok <- !is.na(idx)
+      if (sum(ok) == 0) next
+      lib_cells <- lib_cells[ok, ]
+      m <- m[, idx[ok], drop = FALSE]
+      groups <- factor(lib_cells$pseudobulk_id)
+      ind <- Matrix::sparseMatrix(
+        i = seq_along(groups),
+        j = as.integer(groups),
+        x = 1,
+        dims = c(length(groups), nlevels(groups)),
+        dimnames = list(NULL, levels(groups)))
+      parts[[library_id]] <- m %*% ind
+    }
+    parts
+  }
+
+  # Aggregate to per-perturbation TE_total_fraction for comparison.
+  tagcount_te <- list()
+  for (mode in starsolo_modes) {
+    totals <- list()
+    for (fs in c("genic_repeats", "intergenic_repeats", "genes")) {
+      parts <- build_tagcount_pseudobulks(mode, fs)
+      if (length(parts) == 0) next
+      lib_totals <- vapply(parts, function(p) sum(Matrix::colSums(p)),
+                            numeric(1))
+      totals[[fs]] <- sum(lib_totals)
+    }
+    if (all(c("genic_repeats", "intergenic_repeats", "genes") %in% names(totals))) {
+      te <- totals$genic_repeats + totals$intergenic_repeats
+      tagcount_te[[mode]] <- data.frame(
+        mode = mode,
+        tagcount_te_total_fraction = te / (te + totals$genes))
+    }
+  }
+
+  if (length(tagcount_te) > 0) {
+    tagcount_summary <- bind_rows(tagcount_te)
+    save_csv(tagcount_summary, "tagcount_te_total_summary")
+    knitr::kable(tagcount_summary, digits = 4, format = "html")
+    cat("\n\nFor per-perturbation comparison panels (tagcount minus per_featureset),",
+        "see the simulation evaluation report which evaluates both paths",
+        "against ground truth.\n")
+  } else {
+    cat("tagcount matrices were not loadable for any (mode, feature_set);",
+        "comparison skipped.\n")
+  }
+} else {
+  cat("starsolo_tagcount_base not provided; tagcount comparison panel skipped.\n")
+}
 ```
 
 ## Notes on the design

@@ -25,10 +25,6 @@ source(file.path("scripts", "ggtheme.R"))
 
 eval_dir <- params$eval_dir
 
-make_palette <- function(n) {
-  if (n <= 8)  return(cbbPalette[seq_len(n)])
-  colorRampPalette(cbbPalette)(n)
-}
 ```
 
 ```{r load-data}
@@ -112,15 +108,13 @@ acc_long <- global %>%
   filter(!is.na(value)) %>%
   mutate(metric = factor(metric, levels = acc_metrics))
 
-n_al <- length(unique(acc_long$aligner_mode))
-pal  <- make_palette(n_al)
 
 ggplot(acc_long, aes(x = gran_label, y = value,
                      colour = aligner_mode, group = aligner_mode)) +
   geom_point(size = 2.5, alpha = 0.85) +
   geom_line(linetype = "dashed", linewidth = 0.5) +
   facet_grid(metric ~ feature_set, scales = "free_y") +
-  scale_colour_manual(values = pal, name = "aligner (mode)") +
+  scale_colour_aligner_mode(name = "aligner (mode)") +
   labs(x = "granularity", y = NULL,
        title = "global accuracy metrics",
        subtitle = "rows = metric, columns = feature_set; x = granularity; colour = aligner") +
@@ -138,13 +132,11 @@ ggplot(acc_long, aes(x = gran_label, y = value,
 det <- global %>% filter(!is.na(recall), !is.na(precision))
 
 if (nrow(det) > 0) {
-  n_lab <- length(unique(det$aligner_mode))
-  pal_pr <- make_palette(n_lab)
 
   ggplot(det, aes(x = recall, y = precision,
                   colour = aligner_mode, shape = feature_set)) +
     geom_point(alpha = 0.85) +
-    scale_colour_manual(values = pal_pr, name = "Aligner (mode)") +
+    scale_colour_aligner_mode(name = "Aligner (mode)") +
     scale_shape_manual(values = c(16, 17, 15, 3, 7, 8)[seq_len(
                          length(unique(det$feature_set)))],
                        name = "Feature set") +
@@ -169,21 +161,100 @@ corr <- global %>%
   pivot_longer(c(pearson_r, spearman_r), names_to = "metric", values_to = "r") %>%
   filter(!is.na(r))
 
-n_al <- length(unique(corr$aligner_mode))
-pal_corr <- make_palette(n_al)
 
 ggplot(corr, aes(x = gran_label, y = r,
                   colour = aligner_mode, group = aligner_mode)) +
   geom_line(linetype = "dashed", linewidth = 0.6) +
   geom_point(size = 3) +
   facet_grid(metric ~ feature_set) +
-  scale_colour_manual(values = pal_corr, name = "Aligner (mode)") +
+  scale_colour_aligner_mode(name = "Aligner (mode)") +
   ylim(0, 1) +
   labs(x = "granularity", y = "correlation coefficient",
        title = "Pearson and Spearman correlations",
        subtitle = "rows = metric, columns = feature_set") +
   theme_ng() +
   theme(axis.text.x = element_text(angle = 25, hjust = 1))
+```
+
+## EM / multi-mode effect across aligners
+
+Two complementary panels.
+
+The first computes a per-aligner **multi-minus-unique delta** for each metric: how much does that aligner's multimapper-aware mode help (or hurt) accuracy, against ground truth, relative to its own unique-only baseline? Any aligner with both a unique baseline and a multimapper-aware mode in the workflow appears here automatically — STARsolo's `EM`, `starsolo_tagcount`'s `1/NH`, kallisto's `em`, alevin's `noem`. Aligners with only one mode in the data show as zero-height bars and can be ignored.
+
+The second is the targeted **starsolo vs starsolo_tagcount** scatter when both are present: same BAM source, two counting strategies. Unique-mode points should sit on the diagonal (regression check on `sc_count_features.py`); multi-mode deviations isolate the EM-vs-1/NH bias.
+
+```{r multi-effect-per-aligner, fig.height=8, fig.width=11}
+bias_metrics <- intersect(
+  c("pearson_r", "spearman_r", "f1", "jaccard", "log1p_rmse"),
+  names(global))
+
+per_aligner_delta <- global %>%
+  select(aligner, multimapper_mode, feature_set, gran_label,
+         all_of(bias_metrics)) %>%
+  pivot_longer(all_of(bias_metrics), names_to = "metric",
+               values_to = "value") %>%
+  pivot_wider(names_from = multimapper_mode, values_from = value)
+
+if ("multi" %in% names(per_aligner_delta) && "unique" %in% names(per_aligner_delta)) {
+  per_aligner_delta <- per_aligner_delta %>%
+    filter(!is.na(multi) & !is.na(unique)) %>%
+    mutate(delta = multi - unique,
+           metric = factor(metric, levels = bias_metrics))
+
+  if (nrow(per_aligner_delta) > 0) {
+    ggplot(per_aligner_delta,
+           aes(x = aligner, y = delta, fill = feature_set)) +
+      geom_col(position = position_dodge(width = 0.85), width = 0.8) +
+      geom_hline(yintercept = 0, linetype = "dashed", colour = "grey40") +
+      facet_grid(metric ~ gran_label, scales = "free_y") +
+      labs(x = "aligner", y = "multi minus unique",
+           title = "multi-mode effect per aligner (multi minus unique)",
+           subtitle = "rows = metric, columns = granularity; positive = multi helps, negative = multi hurts") +
+      theme_ng() +
+      theme(axis.text.x = element_text(angle = 30, hjust = 1, size = 8),
+            legend.position = "bottom")
+  } else {
+    cat("no aligner has both unique and multi rows; multi-effect panel skipped.\n")
+  }
+} else {
+  cat("global table is missing one of {unique, multi} multimapper_mode rows;",
+      "multi-effect panel skipped.\n")
+}
+```
+
+```{r tagcount-vs-starsolo-scatter, fig.height=4, fig.width=10}
+have_pair <- (any(global$aligner == "starsolo")
+              && any(global$aligner == "starsolo_tagcount"))
+
+if (have_pair) {
+  agree <- global %>%
+    filter(aligner %in% c("starsolo", "starsolo_tagcount")) %>%
+    select(aligner, multimapper_mode, feature_set, gran_label,
+           pearson_r) %>%
+    pivot_wider(names_from = aligner, values_from = pearson_r) %>%
+    filter(!is.na(starsolo) & !is.na(starsolo_tagcount))
+
+  if (nrow(agree) > 0) {
+    ggplot(agree, aes(x = starsolo, y = starsolo_tagcount,
+                      colour = feature_set, shape = gran_label)) +
+      geom_abline(slope = 1, intercept = 0, linetype = "dashed",
+                  colour = "grey40") +
+      geom_point(size = 2.5, alpha = 0.85) +
+      facet_wrap(~ multimapper_mode) +
+      coord_equal(xlim = c(0, 1), ylim = c(0, 1)) +
+      labs(x = "starsolo Pearson r",
+           y = "starsolo_tagcount Pearson r",
+           title = "starsolo vs starsolo_tagcount Pearson r per (feature_set, granularity)",
+           subtitle = "diagonal = perfect agreement; below = tagcount worse, above = tagcount better") +
+      theme_ng()
+  } else {
+    cat("not enough paired rows to render the scatter.\n")
+  }
+} else {
+  cat("only one of {starsolo, starsolo_tagcount} present;",
+      "scatter panel skipped.\n")
+}
 ```
 
 ## log1p RMSE
@@ -199,15 +270,13 @@ quantification accuracy.
 
 ```{r rmse, fig.height=5}
 if ("log1p_rmse" %in% names(global) && any(!is.na(global$log1p_rmse))) {
-  n_al2 <- length(unique(global$aligner_mode))
-  pal_rmse <- make_palette(n_al2)
 
   ggplot(global, aes(x = gran_label, y = log1p_rmse,
                       colour = aligner_mode, group = aligner_mode)) +
     geom_line(linetype = "dashed", linewidth = 0.6) +
     geom_point(size = 3) +
     facet_wrap(~feature_set, nrow = 1) +
-    scale_colour_manual(values = pal_rmse, name = "Aligner (mode)") +
+    scale_colour_aligner_mode(name = "Aligner (mode)") +
     labs(x = "granularity", y = "log1p RMSE",
          title = "Count quantification error (lower = better)") +
     theme_ng() +
@@ -239,14 +308,12 @@ if (!is.null(per_cell) && nrow(per_cell) > 0) {
     pivot_longer(c(pearson_r, spearman_r), names_to = "metric", values_to = "r") %>%
     filter(!is.na(r))
 
-  n_al3 <- length(unique(pc_long$aligner_mode))
-  pal_pc <- make_palette(n_al3)
 
   ggplot(pc_long, aes(x = aligner_mode, y = r, fill = aligner_mode)) +
     geom_violin(alpha = 0.7, draw_quantiles = c(0.25, 0.5, 0.75)) +
     geom_jitter(width = 0.1, size = 0.8, alpha = 0.5) +
     facet_grid(metric ~ feature_set + gran_label) +
-    scale_fill_manual(values = pal_pc) +
+    scale_fill_aligner_mode(guide = "none") +
     labs(x = NULL, y = "correlation",
          title = "Per-cell correlations",
          subtitle = "rows = metric, columns = feature_set x granularity") +
@@ -268,8 +335,6 @@ if (!is.null(per_family) && nrow(per_family) > 0 && "class_id" %in% names(per_fa
     mutate(gran_label = factor(granularity,
                                levels = c("locus", "gene_id", "family_id", "class_id")))
 
-  n_al4 <- length(unique(pf$aligner_mode))
-  pal_pf <- make_palette(n_al4)
 
   p_f1 <- ggplot(pf, aes(x = class_id, y = f1,
                            colour = aligner_mode, group = aligner_mode)) +
@@ -277,7 +342,7 @@ if (!is.null(per_family) && nrow(per_family) > 0 && "class_id" %in% names(per_fa
     geom_point(size = 2, alpha = 0.85) +
     facet_grid(gran_label ~ feature_set) +
     scale_y_sqrt() +
-    scale_colour_manual(values = pal_pf, name = "Aligner (mode)") +
+    scale_colour_aligner_mode(name = "Aligner (mode)") +
     labs(x = "repeat class", y = "F1",
          title = "F1 per repeat class",
          subtitle = "rows = granularity, columns = feature_set") +
@@ -292,7 +357,7 @@ if (!is.null(per_family) && nrow(per_family) > 0 && "class_id" %in% names(per_fa
     geom_point(size = 2, alpha = 0.85) +
     facet_grid(gran_label ~ feature_set) +
     scale_y_sqrt() +
-    scale_colour_manual(values = pal_pf, name = "Aligner (mode)") +
+    scale_colour_aligner_mode(name = "Aligner (mode)") +
     labs(x = "repeat class", y = "pearson r",
          title = "Pearson r per repeat class") +
     theme_ng() +
@@ -311,8 +376,6 @@ if (!is.null(per_family) && nrow(per_family) > 0 && "class_id" %in% names(per_fa
 ```{r resources, fig.height=5, fig.width=10}
 res_cols <- intersect(c("wall_time_s", "cpu_time_s", "max_rss_mb", "io_in_mb", "io_out_mb"), names(global))
 if (length(res_cols) > 0 && any(!is.na(global[res_cols]))) {
-  n_al5 <- length(unique(global$aligner_mode))
-  pal_res <- make_palette(n_al5)
 
   res <- global %>%
     select(aligner_mode, feature_set, gran_label, all_of(res_cols)) %>%
@@ -324,7 +387,7 @@ if (length(res_cols) > 0 && any(!is.na(global[res_cols]))) {
     geom_line(linetype = "dashed", linewidth = 0.6) +
     geom_point(size = 2) +
     facet_grid(feature_set ~ resource, scales = "free_y") +
-    scale_colour_manual(values = pal_res, name = "Aligner (mode)") +
+    scale_colour_aligner_mode(name = "Aligner (mode)") +
     labs(x = "granularity", y = NULL, title = "compute resource usage") +
     theme_ng() +
     theme(axis.text.x = element_text(angle = 25, hjust = 1))

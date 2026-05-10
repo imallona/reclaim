@@ -48,6 +48,20 @@ if _pipeline_type == 'simulation':
                       .get('multimapper_modes', ['unique']))
     bowtie2_modes = (config.get('aligner_params', {}).get('bowtie2', {})
                      .get('multimapper_modes', ['unique']))
+    # Pseudoaligner modes default to ['unique'] for back-compat: existing
+    # configs that don't list multimapper_modes for kallisto/alevin keep
+    # producing the historical single-mode output. Adding 'em' (kallisto)
+    # or 'noem' (alevin) to the list opts in to the EM-vs-uniform
+    # cross-aligner comparison the simulation benchmark surfaces.
+    kallisto_modes = (config.get('aligner_params', {}).get('kallisto', {})
+                      .get('multimapper_modes', ['unique']))
+    alevin_modes = (config.get('aligner_params', {}).get('alevin', {})
+                    .get('multimapper_modes', ['unique']))
+    if sim_technology == 'smartseq2':
+        # neither kallisto's --em nor alevin's --noem applies to per-cell
+        # smartseq2 quantification; force unique-only.
+        kallisto_modes = [m for m in kallisto_modes if m == 'unique'] or ['unique']
+        alevin_modes = [m for m in alevin_modes if m == 'unique'] or ['unique']
     if sim_technology == 'smartseq2' and 'multi' in starsolo_modes:
         print('Warning: STARsolo soloType SmartSeq does not support EM multimappers '
               '(STAR limitation; EM is only available for soloType CB_UMI_Simple). '
@@ -61,6 +75,35 @@ if _pipeline_type == 'simulation':
                      if fs in ('repeats', 'genic_repeats', 'intergenic_repeats')]
     _eval_fsets = _repeat_fsets
 
+    # starsolo_tagcount as an opt-in aligner: re-counts the STARsolo BAM
+    # via sc_count_features.py against each repeat feature_set GTF. Two
+    # technology variants:
+    #   * chromium: real UMIs in UB tag; --umi-dedup 1mm_all (default).
+    #   * smartseq2: no real UMIs; --umi-dedup none. Requires CB tag on
+    #                STARsolo SmartSeq2 reads (see starsolo.snmk).
+    # Only repeat feature_sets are produced; (genes, gene_id) is served by
+    # STARsolo's own Solo.out/Gene matrix.
+    _has_chromium_tagcount = ('starsolo_tagcount' in active_aligners
+                              and sim_technology == 'chromium')
+    _has_smartseq2_tagcount = ('starsolo_tagcount' in active_aligners
+                         and sim_technology == 'smartseq2')
+    _has_tagcount = _has_chromium_tagcount or _has_smartseq2_tagcount
+    if _has_chromium_tagcount:
+        _tagcount_sample_ids = [sim_technology]
+        _tagcount_canonical_fs = config.get('aligner_params', {}).get(
+            'starsolo', {}).get('sc_count', {}).get(
+            'canonical_feature_set',
+            'genes' if 'genes' in feature_sets else feature_sets[0])
+        # Sim uses --soloCellFilter None (raw/ only); real-data sc uses
+        # EmptyDrops_CR (filtered/ exists). See starsolo_tagcount.snmk.
+        _tagcount_whitelist_dir = 'raw'
+    if _has_smartseq2_tagcount:
+        _smartseq2_tagcount_sample_ids = [sim_technology]
+        _smartseq2_tagcount_canonical_fs = config.get('aligner_params', {}).get(
+            'starsolo', {}).get('sc_count', {}).get(
+            'canonical_feature_set',
+            'genes' if 'genes' in feature_sets else feature_sets[0])
+
     include: "modules/download_references.snmk"
     include: "modules/data_acquisition.snmk"
     include: "modules/reference.snmk"
@@ -71,6 +114,14 @@ if _pipeline_type == 'simulation':
     include: "modules/bowtie2.snmk"
     include: "modules/normalize.snmk"
     include: "modules/evaluation.snmk"
+    if _has_tagcount:
+        include: "modules/bam_index.snmk"
+    if _has_chromium_tagcount:
+        include: "modules/starsolo_tagcount.snmk"
+    if _has_smartseq2_tagcount:
+        include: "modules/smartseq2_tagcount.snmk"
+    if config.get('external_benchmark', False):
+        include: "modules/external_tools_benchmark.snmk"
 
     for _d in ['tmp', 'logs', 'benchmarks', 'counts', 'evaluation']:
         os.makedirs(op.join(config['base'], _d), exist_ok=True)
@@ -167,11 +218,35 @@ if _pipeline_type == 'sc':
 
     _render_report_inputs = []  # set after starsolo_bams/kallisto_counts are defined
 
+    # sc_count_mode toggles the STAR-side counting architecture without
+    # rebuilding existing analyses on disk. Default is per_featureset (one
+    # STAR run per (sample, feature_set), STARsolo emits the count matrix
+    # natively). tagcount switches to one STAR run per library
+    # aligned with genes.gtf, plus pysam-based recount per feature_set
+    # (starsolo_tagcount); its outputs live under
+    # <base>/starsolo_tagcount/ so they coexist with per_featureset
+    # outputs at <base>/starsolo/ without collision.
+    sc_count_mode = config.get('sc_count_mode', 'per_featureset')
+    if sc_count_mode not in ('per_featureset', 'tagcount'):
+        raise ValueError(
+            f'unknown sc_count_mode: {sc_count_mode}; '
+            f'expected one of per_featureset, tagcount')
+
+    if sc_count_mode == 'tagcount':
+        _tagcount_sample_ids = _sc_sample_ids
+        _tagcount_whitelist_dir = 'filtered'
+        _tagcount_canonical_fs = config.get('aligner_params', {}).get(
+            'starsolo', {}).get('sc_count', {}).get(
+            'canonical_feature_set', 'genes')
+
     include: "modules/download_references.snmk"
     include: "modules/reference.snmk"
     include: "modules/download_sra.snmk"
     include: "modules/starsolo_sc.snmk"
     include: "modules/kallisto_sc.snmk"
+    if sc_count_mode == 'tagcount':
+        include: "modules/bam_index.snmk"
+        include: "modules/starsolo_tagcount.snmk"
 
     for _d in ['tmp', 'logs', 'benchmarks', 'metadata']:
         os.makedirs(op.join(config['base'], _d), exist_ok=True)
@@ -238,14 +313,33 @@ def simulation_count_outputs():
                 op.join(counts_dir, 'starsolo_{feature_set}_locus_{multimapper_mode}.tsv'),
                 feature_set=_repeat_fsets, multimapper_mode=starsolo_modes)
 
+    if 'starsolo_tagcount' in active_aligners:
+        # tagcount runs on chromium (real UMIs) and smartseq2 (none-dedup).
+        # Repeat feature_sets only; (genes, gene_id) comes from STARsolo's
+        # own Solo.out/Gene matrix. Locus is not produced by
+        # sc_count_features.py (gene_id is the finest level it emits).
+        if _non_locus_grans:
+            outputs += expand(
+                op.join(counts_dir,
+                        'starsolo_tagcount_{feature_set}_{granularity}_{multimapper_mode}.tsv'),
+                feature_set=_repeat_fsets, granularity=_non_locus_grans,
+                multimapper_mode=starsolo_modes)
+
+    aligner_modes = {'kallisto': kallisto_modes, 'alevin': alevin_modes}
     for aligner in ('kallisto', 'alevin'):
         if aligner not in active_aligners:
             continue
+        modes = aligner_modes[aligner]
         if 'genes' in feature_sets:
-            outputs.append(op.join(counts_dir, f'{aligner}_genes_gene_id_unique.tsv'))
+            outputs += expand(
+                op.join(counts_dir,
+                        f'{aligner}_genes_gene_id_{{multimapper_mode}}.tsv'),
+                multimapper_mode=modes)
         outputs += expand(
-            op.join(counts_dir, f'{aligner}_{{feature_set}}_{{granularity}}_unique.tsv'),
-            feature_set=_repeat_fsets, granularity=granularities)
+            op.join(counts_dir,
+                    f'{aligner}_{{feature_set}}_{{granularity}}_{{multimapper_mode}}.tsv'),
+            feature_set=_repeat_fsets, granularity=granularities,
+            multimapper_mode=modes)
 
     if 'bowtie2' in active_aligners:
         outputs += expand(
@@ -263,18 +357,30 @@ def simulation_evaluation_outputs():
                     'starsolo_{feature_set}_{granularity}_{multimapper_mode}_global_metrics.tsv'),
             feature_set=_eval_fsets, granularity=granularities,
             multimapper_mode=starsolo_modes)
+    if 'starsolo_tagcount' in active_aligners:
+        # tagcount produces gene_id/family_id/class_id (no locus). Both
+        # chromium and smartseq2 simulations now go through tagcount, so
+        # no technology guard here.
+        _tc_grans = [g for g in granularities if g != 'locus']
+        outputs += expand(
+            op.join(eval_dir,
+                    'starsolo_tagcount_{feature_set}_{granularity}_{multimapper_mode}_global_metrics.tsv'),
+            feature_set=_eval_fsets, granularity=_tc_grans,
+            multimapper_mode=starsolo_modes)
     if 'bowtie2' in active_aligners:
         outputs += expand(
             op.join(eval_dir,
                     'bowtie2_{feature_set}_{granularity}_{multimapper_mode}_global_metrics.tsv'),
             feature_set=_eval_fsets, granularity=granularities,
             multimapper_mode=bowtie2_modes)
+    aligner_modes = {'kallisto': kallisto_modes, 'alevin': alevin_modes}
     for aligner in ('kallisto', 'alevin'):
         if aligner in active_aligners:
             outputs += expand(
                 op.join(eval_dir,
-                        f'{aligner}_{{feature_set}}_{{granularity}}_unique_global_metrics.tsv'),
-                feature_set=_eval_fsets, granularity=granularities)
+                        f'{aligner}_{{feature_set}}_{{granularity}}_{{multimapper_mode}}_global_metrics.tsv'),
+                feature_set=_eval_fsets, granularity=granularities,
+                multimapper_mode=aligner_modes[aligner])
     outputs.append(op.join(eval_dir, 'summary_global_metrics.tsv'))
     outputs.append(op.join(eval_dir, 'evaluation_report.html'))
     return outputs
@@ -301,12 +407,39 @@ def bulk_count_outputs():
 def starsolo_bams():
     if 'starsolo' not in active_aligners:
         return []
+    # In tagcount mode only the canonical-feature_set BAM is needed (the
+    # tagcount path re-counts that single BAM against every feature_set),
+    # so we drop the per-feature_set fanout. per_featureset keeps the
+    # full enumeration for backward compatibility.
+    if sc_count_mode == 'tagcount':
+        canonical = _tagcount_canonical_fs
+        return [
+            op.join(config['base'], 'starsolo', sid, f'unique_{canonical}',
+                    'Aligned.sortedByCoord.out.bam')
+            for sid in _sc_sample_ids
+        ]
     return [
         op.join(config['base'], 'starsolo', sid, f'{mode}_{fs}',
                 'Aligned.sortedByCoord.out.bam')
         for sid in _sc_sample_ids
         for mode in starsolo_modes
         for fs in feature_sets
+    ]
+
+
+def starsolo_tagcount_outputs():
+    if sc_count_mode != 'tagcount':
+        return []
+    # Restricted to repeat feature_sets: at (genes, gene_id) STARsolo's
+    # filtered/ matrix is canonical (see starsolo_tagcount.snmk).
+    repeat_fsets = [fs for fs in feature_sets
+                    if fs in ('repeats', 'genic_repeats', 'intergenic_repeats')]
+    return [
+        op.join(config['base'], 'starsolo_tagcount', sid,
+                f'{mode}_{fs}', 'Solo.out', 'Gene', 'raw')
+        for sid in _sc_sample_ids
+        for mode in starsolo_modes
+        for fs in repeat_fsets
     ]
 
 
@@ -329,11 +462,26 @@ if _pipeline_type == 'bulk' and config.get('report'):
 
 if _pipeline_type == 'sc' and config.get('report'):
     _render_report_inputs = (
-        starsolo_bams() + kallisto_counts()
+        starsolo_bams() + starsolo_tagcount_outputs() + kallisto_counts()
         + ([_metadata_txt] if _metadata_url else [])
         + [op.join(config['indices_base'], 'indices', genome_tag,
                    'repeat_biology_annotation.tsv')]
     )
+    if config.get('starsolo_log_summary', False):
+        _starsolo_log_summary_inputs = starsolo_bams()
+        include: "modules/starsolo_log_summary.snmk"
+        _render_report_inputs = (
+            _render_report_inputs + [_starsolo_log_summary_tsv]
+        )
+    if config.get('per_cell_mismatch', False):
+        _per_cell_mismatch_cells = op.abspath(op.join(
+            workflow.basedir,
+            config['report'].get('cells_to_perturbation', '')
+        ))
+        include: "modules/per_cell_mismatch.snmk"
+        _render_report_inputs = (
+            _render_report_inputs + [_per_cell_mismatch_tsv]
+        )
     include: "modules/render_report.snmk"
 
 
@@ -350,6 +498,8 @@ def _all_inputs():
         inputs += simulation_outputs()
         inputs += simulation_count_outputs()
         inputs += simulation_evaluation_outputs()
+        if config.get('external_benchmark', False):
+            inputs += external_benchmark_outputs()
 
     elif _pipeline_type == 'bulk':
         inputs += [_raw_r1(sid) for sid in _bulk_sample_ids]
@@ -365,6 +515,7 @@ def _all_inputs():
                 inputs.append(srr_cb(sid, srr))
                 inputs.append(srr_cdna(sid, srr))
         inputs += starsolo_bams()
+        inputs += starsolo_tagcount_outputs()
         inputs += kallisto_counts()
         if _metadata_url:
             inputs.append(_metadata_txt)
