@@ -120,6 +120,8 @@ if _pipeline_type == 'simulation':
         include: "modules/starsolo_tagcount.snmk"
     if _has_smartseq2_tagcount:
         include: "modules/smartseq2_tagcount.snmk"
+    if config.get('external_benchmark', False):
+        include: "modules/external_tools_benchmark.snmk"
 
     for _d in ['tmp', 'logs', 'benchmarks', 'counts', 'evaluation']:
         os.makedirs(op.join(config['base'], _d), exist_ok=True)
@@ -496,6 +498,8 @@ def _all_inputs():
         inputs += simulation_outputs()
         inputs += simulation_count_outputs()
         inputs += simulation_evaluation_outputs()
+        if config.get('external_benchmark', False):
+            inputs += external_benchmark_outputs()
 
     elif _pipeline_type == 'bulk':
         inputs += [_raw_r1(sid) for sid in _bulk_sample_ids]

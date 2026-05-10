@@ -1,0 +1,435 @@
+#!/usr/bin/env snakemake -s
+"""
+External-tool benchmark module.
+
+Runs published repeat-quantification tools (TEtranscripts, scTE, optional
+SQuIRE) on the same simulation BAMs and fastqs that REclaim already aligned,
+harmonises their per-tool output into REclaim's feature x cell TSV format,
+and reuses workflow/scripts/evaluate.py to score them against the same
+ground truth at the same granularities. The resulting metrics tables are
+directly comparable to the per-aligner REclaim metrics in
+{base}/evaluation/.
+
+Active tools are declared by the configuration:
+
+  external_benchmark: true
+  external_tools: [tetranscripts, scte]   # optional 'squire'
+  external_samples: [cell_001, cell_002]  # cell ids whose BAMs are processed
+  external_granularities: [gene_id, family_id, class_id]
+
+Outputs land at:
+  {base}/external_benchmark/{tool}/raw/                      tool-native output
+  {base}/external_benchmark/{tool}/counts.tsv                 harmonised matrix
+  {base}/external_benchmark/{tool}/{tool}_repeats_{granularity}_unique_global_metrics.tsv
+                                                              evaluate.py output
+  {base}/external_benchmark/summary_global_metrics.tsv        concatenation
+  {base}/external_benchmark/external_benchmark_report.html    rendered comparison
+
+Inputs consumed:
+  {base}/simulations/{technology}/ground_truth.tsv
+  {base}/simulations/{technology}/cell_<NNN>.fastq.gz             SmartSeq2
+  {base}/starsolo/{technology}/unique_repeats/Aligned.sortedByCoord.out.bam  Chromium
+  {indices_base}/indices/{genome_tag}/repeats_locus_map.tsv
+  {indices_base}/indices/{genome_tag}/repeats.gtf
+  {indices_base}/indices/{genome_tag}/genes.gtf
+
+The TEtranscripts and scTE wrappers expect the BAMs to already exist (the
+simulation pipeline produces them). This module never re-aligns reads.
+"""
+
+import os.path as op
+
+
+_ext_outdir = op.join(config['base'], 'external_benchmark')
+_eval_dir = op.join(config['base'], 'evaluation')
+_ext_tools = config.get('external_tools', [])
+_ext_samples = config.get('external_samples', [])
+_ext_granularities = config.get('external_granularities', ['gene_id', 'family_id', 'class_id'])
+_ext_min_overlap = config.get('external_min_overlap_fraction', 0.05)
+
+_sim_technology = config.get('simulation', {}).get('technology', 'smartseq2')
+_sim_mutation_rate = config.get('simulation', {}).get('mutation_rate', 0.0)
+
+_eval_script = op.join(workflow.basedir, 'scripts', 'evaluate.py')
+_harmonize_script = op.join(workflow.basedir, 'scripts',
+                            'harmonize_external_counts.py')
+
+_locus_map = op.join(config['indices_base'], 'indices', genome_tag,
+                     'repeats_locus_map.tsv')
+_repeats_gtf = op.join(config['indices_base'], 'indices', genome_tag,
+                       'repeats.gtf')
+_genes_gtf = op.join(config['indices_base'], 'indices', genome_tag,
+                     'genes.gtf')
+
+_ground_truth = op.join(config['base'], 'simulations', _sim_technology,
+                        'ground_truth.tsv')
+
+
+def _per_sample_bam(wildcards):
+    """SmartSeq2 has one BAM per cell; Chromium has a single multi-cell BAM
+    with CB tags. The wildcard {sample} disambiguates which we want."""
+    if _sim_technology == 'smartseq2':
+        return op.join(config['base'], 'starsolo', _sim_technology,
+                       wildcards.sample, 'unique_repeats',
+                       'Aligned.sortedByCoord.out.bam')
+    return op.join(config['base'], 'starsolo', _sim_technology,
+                   'unique_repeats', 'Aligned.sortedByCoord.out.bam')
+
+
+def _all_bams_for_tool():
+    if _sim_technology == 'smartseq2':
+        return [op.join(config['base'], 'starsolo', _sim_technology, s,
+                        'unique_repeats', 'Aligned.sortedByCoord.out.bam')
+                for s in _ext_samples]
+    return [op.join(config['base'], 'starsolo', _sim_technology,
+                    'unique_repeats', 'Aligned.sortedByCoord.out.bam')]
+
+
+# ----------------------------------------------------------------------
+# TEtranscripts (bulk; one run aggregates all samples into one count table)
+# ----------------------------------------------------------------------
+
+rule run_tetranscripts_per_sample:
+    """Run TEcount per sample. TEcount accepts one -b BAM per invocation;
+    we loop in shell for SmartSeq2 (one BAM per cell) and produce one
+    cntTable per sample. The merge rule below assembles them into a
+    single feature x sample table that the harmoniser consumes.
+    """
+    conda: op.join(workflow.basedir, 'envs', 'tetranscripts.yaml')
+    input:
+        bam = _per_sample_bam,
+        repeats_gtf = _repeats_gtf,
+        genes_gtf = _genes_gtf,
+    output:
+        cnt = op.join(_ext_outdir, 'tetranscripts', 'raw',
+                      '{sample}.cntTable'),
+    wildcard_constraints:
+        sample = '|'.join(_ext_samples) if _ext_samples else 'NEVER_MATCH',
+    params:
+        outdir = op.join(_ext_outdir, 'tetranscripts', 'raw'),
+        prefix = '{sample}',
+    log:
+        op.join(config['base'], 'logs', 'tetranscripts_{sample}.log'),
+    benchmark:
+        op.join(config['base'], 'benchmarks', 'tetranscripts_{sample}.txt'),
+    threads: 2
+    resources:
+        mem_mb = config['resources']['max_mem_mb'],
+    shell:
+        r"""
+        mkdir -p {params.outdir}
+        TEcount \
+            --sortByPos \
+            --mode multi \
+            --GTF {input.genes_gtf} \
+            --TE {input.repeats_gtf} \
+            --project {params.outdir}/{params.prefix} \
+            -b {input.bam} \
+            2> {log}
+        if [ ! -f {params.outdir}/{params.prefix}.cntTable ]; then
+            echo "TEcount produced no cntTable for {wildcards.sample}" >&2
+            exit 2
+        fi
+        """
+
+
+rule merge_tetranscripts:
+    """Combine per-sample TEcount cntTables into a single feature x sample
+    TSV. TEcount's cntTable is two columns: gene/TE id, count. We join on
+    the feature id column. The merge_tecount_tables.py helper consumes
+    parallel --inputs/--samples lists. The merged file's name is distinct
+    from the per-sample names so the {sample}.cntTable wildcard in
+    run_tetranscripts_per_sample does not also try to produce it.
+    """
+    conda: op.join(workflow.basedir, 'envs', 'evaluation.yaml')
+    input:
+        cnts = expand(
+            op.join(_ext_outdir, 'tetranscripts', 'raw', '{sample}.cntTable'),
+            sample=_ext_samples),
+    output:
+        merged = op.join(_ext_outdir, 'tetranscripts', 'raw',
+                         'tetranscripts_merged.cntTable'),
+    params:
+        samples = ' '.join(_ext_samples),
+        merge_script = op.join(workflow.basedir, 'scripts',
+                               'merge_tecount_tables.py'),
+    log:
+        op.join(config['base'], 'logs', 'merge_tetranscripts.log'),
+    shell:
+        r"""
+        python {params.merge_script} \
+            --inputs {input.cnts} \
+            --samples {params.samples} \
+            --output {output.merged} \
+            2> {log}
+        """
+
+
+# ----------------------------------------------------------------------
+# scTE (single-cell; one Chromium BAM with CB tags)
+# ----------------------------------------------------------------------
+
+rule run_scte_index:
+    conda: op.join(workflow.basedir, 'envs', 'scte.yaml')
+    input:
+        repeats_gtf = _repeats_gtf,
+        genes_gtf = _genes_gtf,
+    output:
+        idx = op.join(_ext_outdir, 'scte', 'index', 'scte_index.idx'),
+    params:
+        outdir = op.join(_ext_outdir, 'scte', 'index'),
+        genome = config.get('reference', {}).get('assembly', 'hg38'),
+    log:
+        op.join(config['base'], 'logs', 'scte_index.log'),
+    benchmark:
+        op.join(config['base'], 'benchmarks', 'scte_index.txt'),
+    shell:
+        r"""
+        mkdir -p {params.outdir}
+        scTE_build \
+            -g {params.genome} \
+            -te {input.repeats_gtf} \
+            -gene {input.genes_gtf} \
+            -o {output.idx} \
+            2> {log}
+        """
+
+
+rule run_scte:
+    conda: op.join(workflow.basedir, 'envs', 'scte.yaml')
+    input:
+        bam = op.join(config['base'], 'starsolo', _sim_technology,
+                      'unique_repeats', 'Aligned.sortedByCoord.out.bam'),
+        idx = op.join(_ext_outdir, 'scte', 'index', 'scte_index.idx'),
+    output:
+        h5ad = op.join(_ext_outdir, 'scte', 'raw', 'scte_counts.h5ad'),
+    params:
+        outdir = op.join(_ext_outdir, 'scte', 'raw'),
+        prefix = 'scte_counts',
+    log:
+        op.join(config['base'], 'logs', 'scte.log'),
+    benchmark:
+        op.join(config['base'], 'benchmarks', 'scte.txt'),
+    threads: 4
+    resources:
+        mem_mb = config['resources']['max_mem_mb'],
+    shell:
+        r"""
+        mkdir -p {params.outdir}
+        scTE \
+            -i {input.bam} \
+            -o {params.outdir}/{params.prefix} \
+            -x {input.idx} \
+            -CB CB \
+            -UMI UB \
+            -p {threads} \
+            2> {log}
+        if [ ! -f {params.outdir}/{params.prefix}.h5ad ]; then
+            echo "scTE produced no h5ad output" >&2; exit 2
+        fi
+        """
+
+
+# ----------------------------------------------------------------------
+# SQuIRE (optional, bulk; flagged best-effort due to old deps)
+# ----------------------------------------------------------------------
+
+rule run_squire:
+    conda: op.join(workflow.basedir, 'envs', 'squire.yaml')
+    input:
+        bams = _all_bams_for_tool(),
+        repeats_gtf = _repeats_gtf,
+    output:
+        counts = op.join(_ext_outdir, 'squire', 'raw', 'squire_counts.tsv'),
+    params:
+        outdir = op.join(_ext_outdir, 'squire', 'raw'),
+        squire_combine_script = op.join(workflow.basedir, 'scripts',
+                                        'squire_combine_counts.py'),
+    log:
+        op.join(config['base'], 'logs', 'squire.log'),
+    benchmark:
+        op.join(config['base'], 'benchmarks', 'squire.txt'),
+    threads: 4
+    resources:
+        mem_mb = config['resources']['max_mem_mb'],
+    shell:
+        r"""
+        mkdir -p {params.outdir}
+        ## SQuIRE Count expects a directory of BAMs and writes
+        ## squire_count_<sample>.txt per sample. We aggregate them in a
+        ## single combined TSV with subfamily, family, class columns
+        ## plus one count column per sample. SQuIRE has older Python and
+        ## STAR pins; if it fails to install on the target machine,
+        ## drop 'squire' from external_tools in the config.
+        squire Count \
+            --map_folder {params.outdir}/maps \
+            --output_folder {params.outdir} \
+            --read_length 50 \
+            --pthreads {threads} \
+            --gtf {input.repeats_gtf} \
+            2> {log}
+        python {params.squire_combine_script} \
+            --indir {params.outdir} \
+            --output {output.counts} \
+            2>> {log}
+        """
+
+
+# ----------------------------------------------------------------------
+# Harmonize per-tool output to REclaim's feature x cell TSV format
+# ----------------------------------------------------------------------
+
+def _tool_raw_input(wildcards):
+    if wildcards.tool == 'tetranscripts':
+        return op.join(_ext_outdir, 'tetranscripts', 'raw',
+                       'tetranscripts_merged.cntTable')
+    if wildcards.tool == 'scte':
+        return op.join(_ext_outdir, 'scte', 'raw', 'scte_counts.h5ad')
+    if wildcards.tool == 'squire':
+        return op.join(_ext_outdir, 'squire', 'raw', 'squire_counts.tsv')
+    raise ValueError(f'unknown external tool {wildcards.tool!r}')
+
+
+rule harmonize_external:
+    conda: op.join(workflow.basedir, 'envs', 'evaluation.yaml')
+    input:
+        raw = _tool_raw_input,
+        locus_map = _locus_map,
+    output:
+        counts = op.join(_ext_outdir, '{tool}',
+                         '{tool}_repeats_{granularity}_unique.tsv'),
+    params:
+        samples = ','.join(_ext_samples),
+        min_overlap = _ext_min_overlap,
+    wildcard_constraints:
+        tool = '|'.join(['tetranscripts', 'scte', 'squire']),
+        granularity = 'gene_id|family_id|class_id',
+    log:
+        op.join(config['base'], 'logs', 'harmonize_{tool}_{granularity}.log'),
+    shell:
+        r"""
+        python {_harmonize_script} \
+            --tool {wildcards.tool} \
+            --input {input.raw} \
+            --locus-map {input.locus_map} \
+            --samples '{params.samples}' \
+            --granularity {wildcards.granularity} \
+            --min-overlap-fraction {params.min_overlap} \
+            --output {output.counts} \
+            2> {log}
+        """
+
+
+# ----------------------------------------------------------------------
+# Score harmonised counts against ground truth (reuse evaluate.py)
+# ----------------------------------------------------------------------
+
+rule score_external_benchmark:
+    conda: op.join(workflow.basedir, 'envs', 'evaluation.yaml')
+    input:
+        ground_truth = _ground_truth,
+        counts = op.join(_ext_outdir, '{tool}',
+                         '{tool}_repeats_{granularity}_unique.tsv'),
+        locus_map = _locus_map,
+    output:
+        global_metrics = op.join(_ext_outdir, '{tool}',
+                                 '{tool}_repeats_{granularity}_unique_global_metrics.tsv'),
+        per_cell = op.join(_ext_outdir, '{tool}',
+                           '{tool}_repeats_{granularity}_unique_per_cell_metrics.tsv'),
+        per_family = op.join(_ext_outdir, '{tool}',
+                             '{tool}_repeats_{granularity}_unique_per_family_metrics.tsv'),
+    params:
+        mutation_rate = _sim_mutation_rate,
+        benchmark_file = lambda wc: op.join(config['base'], 'benchmarks',
+                                            f'{wc.tool}.txt'),
+        output_prefix = op.join(_ext_outdir, '{tool}',
+                                '{tool}_repeats_{granularity}_unique'),
+    wildcard_constraints:
+        tool = '|'.join(['tetranscripts', 'scte', 'squire']),
+        granularity = 'gene_id|family_id|class_id',
+    log:
+        op.join(config['base'], 'logs', 'score_{tool}_{granularity}.log'),
+    shell:
+        r"""
+        python {_eval_script} \
+            --ground-truth {input.ground_truth} \
+            --observed-counts {input.counts} \
+            --aligner {wildcards.tool} \
+            --multimapper-mode unique \
+            --granularity {wildcards.granularity} \
+            --feature-set repeats \
+            --locus-map {input.locus_map} \
+            --benchmark {params.benchmark_file} \
+            --output-prefix {params.output_prefix} \
+            --mutation-rate {params.mutation_rate} \
+            2> {log}
+        """
+
+
+# ----------------------------------------------------------------------
+# Aggregate per-tool metrics + render comparison report
+# ----------------------------------------------------------------------
+
+def external_global_metric_files():
+    return [
+        op.join(_ext_outdir, t,
+                f'{t}_repeats_{g}_unique_global_metrics.tsv')
+        for t in _ext_tools
+        for g in _ext_granularities
+    ]
+
+
+rule aggregate_external_global_metrics:
+    input:
+        files = external_global_metric_files(),
+    output:
+        summary = op.join(_ext_outdir, 'summary_global_metrics.tsv'),
+    run:
+        import csv
+        all_rows = []
+        for path in input.files:
+            with open(path) as fh:
+                rows = list(csv.DictReader(fh, delimiter='\t'))
+                all_rows.extend(rows)
+        if not all_rows:
+            raise RuntimeError('no per-tool global metrics rows')
+        with open(output.summary, 'w', newline='') as fh:
+            w = csv.DictWriter(fh, fieldnames=all_rows[0].keys(),
+                               delimiter='\t')
+            w.writeheader()
+            w.writerows(all_rows)
+
+
+rule render_external_benchmark_report:
+    conda: op.join(workflow.basedir, 'envs', 'rmarkdown.yaml')
+    input:
+        ext_summary = op.join(_ext_outdir, 'summary_global_metrics.tsv'),
+        reclaim_summary = op.join(_eval_dir, 'summary_global_metrics.tsv'),
+    output:
+        html = op.join(_ext_outdir, 'external_benchmark_report.html'),
+    params:
+        rmd = op.join(workflow.basedir, 'scripts',
+                      'external_benchmark_report.Rmd'),
+        ext_dir = op.abspath(_ext_outdir),
+        eval_dir = op.abspath(_eval_dir),
+        out_html = op.abspath(op.join(_ext_outdir,
+                                      'external_benchmark_report.html')),
+    log:
+        op.join(config['base'], 'logs', 'external_benchmark_report.log'),
+    shell:
+        """
+        Rscript -e "rmarkdown::render(
+            '{params.rmd}',
+            output_file = '{params.out_html}',
+            knit_root_dir = getwd(),
+            params = list(ext_dir = '{params.ext_dir}',
+                          reclaim_eval_dir = '{params.eval_dir}')
+        )" 2> {log}
+        """
+
+
+def external_benchmark_outputs():
+    return [
+        op.join(_ext_outdir, 'summary_global_metrics.tsv'),
+        op.join(_ext_outdir, 'external_benchmark_report.html'),
+    ]

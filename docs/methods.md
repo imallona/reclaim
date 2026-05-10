@@ -112,6 +112,20 @@ For 10x Chromium, kallisto and alevin normalization uses sparse accumulators. On
 
 The bowtie2 Chromium counting script streams the CB-tagged deduplicated BAM once via `samtools view`, accumulating `(barcode, feature)` counts in a sparse dict without per-cell BAM splitting.
 
+### Repeat differential expression: TMM, gene_lib, and RUVg
+
+Differential expression on the repeat count matrix is run with edgeR's quasi-likelihood (`glmQLFit` + `glmQLFTest`). Three normalization paths are available and reported side by side in the count-level benchmark and in the paper-side reports:
+
+- **TMM on repeats**: `calcNormFactors(method = "TMM")` fit on the repeat matrix. The standard practice. Assumes most repeat subfamilies are not differentially expressed; when this assumption holds, TMM is unbiased.
+- **gene_lib transfer**: `calcNormFactors(method = "TMM")` fit on the *gene* matrix, then transferred to the repeat DGEList by setting `lib.size` and `norm.factors` from the gene fit. The repeat matrix never sees its own size factors. Used when many repeats co-move and the "most features not DE" assumption is suspect (the gene matrix still satisfies it). See `workflow/scripts/gene_lib_size_common.R::run_gene_lib_repeat_de`.
+- **RUVg(k)**: empirical controls picked from the gene matrix as the least-significant genes under a naive F-test on TMM-normalized gene counts; `RUVg(set, controls, k)` fits k unwanted-variation factors W; the repeat DE design becomes `~ W + group` (or `~ sample_block + W + group`). See `workflow/scripts/ruv_common.R`.
+
+The count-level benchmark module exercises all three (plus a `none` path with `norm.factors = 1` as a lower bound) and exposes recovered logFC per planted feature so a bias slope can be computed per method.
+
+### Coordinated-derepression scenario
+
+The default count-level scenario (`workflow/configs/de_simulations_polymenidou_bulk.yaml`) plants a small, mixed-direction set of DE repeats: TMM is in its happy regime and the metric of interest is power across the depth grid. The coordinated-derepression scenario (`workflow/configs/de_simulations_coordinated_derepression.yaml`) plants a large, same-sign set of DE repeats with class-weighted selection biased toward young polyA-competent retrotransposons (LINE, SINE, LTR, Retroposon). It mirrors the TDP-43 overexpression biology and is the controlled test of the TMM-compression claim. Recovered logFC is exported per (method, feature, replicate, grid cell) to `de_simulations_recovered_logfc.tsv.gz` and the report Rmd computes per-method bias slopes (recovered ~ planted) at the canonical depth cell. See `docs/de_simulations.md` for the full parameter set.
+
 ## Evaluation
 
 `evaluate.py` compares each aligner's count matrix against the simulation ground truth at three levels:
@@ -128,6 +142,24 @@ The `aggregate_global_metrics` rule concatenates all per-aligner global metric T
 
 An HTML report (`evaluation_report.html`) is rendered by `evaluation_report.Rmd` using `rmarkdown::render` with ggplot2 + patchwork. The report also writes paper-ready CSV tables to `{eval_dir}/paper_csv/`: `global_metrics_long.csv` (tidy long format), `global_metrics_wide.csv`, `aligner_ranking_per_metric.csv` (rank per feature_set x granularity x metric, direction-aware), `best_aligner_per_metric.csv` (best, second, delta), `per_cell_metrics_summary.csv` (n, mean, median, sd, q25, q75 per aligner x granularity x feature_set), `per_class_metrics.csv`, and `resources_wide.csv`.
 
+### External tool benchmark
+
+When `external_benchmark: true` is set in a simulation config, an additional module (`workflow/modules/external_tools_benchmark.snmk`) runs published repeat-quantification tools on the same simulation BAMs and ground truth as REclaim and scores them through the same `evaluate.py`. Tool coverage:
+
+| Tool | Modality | Native granularity | Conda env |
+|---|---|---|---|
+| TEtranscripts (TEcount) | bulk | gene_id (subfamily) | `workflow/envs/tetranscripts.yaml` (TEtranscripts 2.2.3) |
+| scTE | single cell | family_id | `workflow/envs/scte.yaml` (scTE 1.0.0) |
+| SQuIRE | bulk (optional) | locus | `workflow/envs/squire.yaml` (SQuIRE 0.9.9.92) |
+
+Per tool, three rules produce the final accuracy table:
+
+1. `run_<tool>` invokes the upstream tool. TEcount runs once per simulated SmartSeq2 cell; scTE runs once on the multi-cell Chromium BAM. Outputs land under `{base}/external_benchmark/{tool}/raw/`.
+2. `harmonize_external` calls `workflow/scripts/harmonize_external_counts.py` to convert the tool's native output to the REclaim feature x cell TSV format. The harmoniser asserts that at least `external_min_overlap_fraction` of the tool's feature IDs map to a known REclaim feature in the locus_map.
+3. `score_external_benchmark` runs the same `evaluate.py` used for REclaim's own quantifiers, with the same locus_map and granularity contracts.
+
+The render rule reads `summary_global_metrics.tsv` from both `external_benchmark/` and `evaluation/` and produces side-by-side accuracy bars per quantifier, granularity, and class. REdiscoverTE is not included; rationale in `docs/external_tool_benchmark.md`.
+
 A separate noise sweep report (`noise_sweep_report.Rmd`) loads `summary_global_metrics.tsv` from each noise-level run and plots metric degradation as a function of mutation rate. It writes paper-ready CSV tables to `{csv_outdir}/paper_csv/` (by default the directory of the HTML output): `noise_metrics_long.csv`, `noise_metrics_wide.csv` (columns per mutation rate), `noise_degradation_slopes.csv` (linear fit `value ~ mutation_rate` with slope, intercept, R^2, n_points per aligner x feature_set x granularity x metric), `noise_robustness_ranking.csv` (ranks aligners by shallowest slope for accuracy metrics), `per_cell_noise_summary.csv`, and `per_class_noise_metrics.csv`.
 
 ## Conda environments
@@ -143,6 +175,9 @@ A separate noise sweep report (`noise_sweep_report.Rmd`) loads `summary_global_m
 | rmarkdown   | envs/rmarkdown.yaml  | R, rmarkdown, ggplot2, patchwork          |
 | edger       | envs/edger.yaml      | R, edgeR, rmarkdown, ggplot2              |
 | ruvseq      | paper/envs/ruvseq.yaml | R, edgeR, RUVSeq, EDASeq, rmarkdown     |
+| tetranscripts | envs/tetranscripts.yaml | TEtranscripts 2.2.3, samtools         |
+| scte        | envs/scte.yaml       | scTE 1.0.0, anndata, h5py                 |
+| squire      | envs/squire.yaml     | SQuIRE 0.9.9.92 (Python 3.6, STAR 2.5.3a) |
 
 ## Paper analyses
 

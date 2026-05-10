@@ -1,0 +1,20 @@
+## Conda env for the optional SQuIRE bulk benchmark.
+## SQuIRE requires Python 3.6 and STAR 2.5.3a; the upstream tool is no
+## longer maintained. The pin below reproduces the original Bioconda recipe
+## as of 2022, with samtools/star pinned to versions known to work. Treat
+## this env as best-effort: if the install fails on the target machine, the
+## external benchmark Snakefile drops SQuIRE from the run and notes the
+## skip in the report.
+name: repeats_squire
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.6
+  - star=2.5.3a
+  - samtools=1.9
+  - bedtools=2.29.0
+  - pip
+  - pip:
+      - SQuIRE==0.9.9.92

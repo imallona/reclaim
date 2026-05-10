@@ -215,6 +215,17 @@ Phase 2 (planned): SRA fastq download and STARsolo alignment via a new `workflow
 
 Phase 3 (planned): per-perturbation pseudobulk DE under `~ W + group` with RUVg, mirroring the TDP-43 paper-side workflow. Validation step correlates REclaim's per-perturbation `te_total_fraction` against Replogle's `replogle_te_ratio` from `selected_perturbations.tsv`.
 
+## External tool benchmark
+
+A separate config flag `external_benchmark: true` activates a comparison of REclaim against published repeat-quantification tools (TEtranscripts, scTE, optionally SQuIRE) on the same simulation BAMs and ground truth, scored by the same `evaluate.py`. See [docs/external_tool_benchmark.md](docs/external_tool_benchmark.md) for tool choices, version pins, and harmonisation contract.
+
+```
+make external_benchmark_smartseq2 CORES=N    # TEtranscripts on SmartSeq2 simulation
+make external_benchmark_chromium  CORES=N    # scTE on Chromium simulation
+```
+
+Outputs land at `results/{simulation_*}/external_benchmark/external_benchmark_report.html` alongside the per-tool harmonised counts and accuracy tables.
+
 ## Implementation notes
 
 Chromium normalization (kallisto, alevin) uses sparse accumulators to avoid allocating a dense cells x features matrix. Only non-zero (cell_index, count) pairs are stored per feature group, keeping memory proportional to expressed pairs rather than O(features x cells).

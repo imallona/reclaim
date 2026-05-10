@@ -8,6 +8,14 @@ power and false positive rate per normalization strategy across simulation
 replicates. Inputs are pre-computed gene and repeat count TSVs from a real
 bulk run; this module does not execute alignment.
 
+The same module covers two scenarios via the same config keys:
+  - default (small fraction DE, mixed direction): probes power and FPR;
+    TMM-on-repeats is unbiased.
+  - coordinated derepression (large fraction DE, all same direction):
+    n_de_repeats high, signed_fraction = 1.0, optional class_weights to bias
+    selection toward young retrotransposons. TMM-on-repeats compresses the
+    recovered logFC; gene_lib transfer is unbiased.
+
 Required keys under config['de_simulation']:
   gene_counts        path to gene count TSV (rows = features, cols = samples)
   repeat_counts      path to repeat count TSV with same sample columns
@@ -27,6 +35,9 @@ Optional keys (defaults shown):
   n_controls         200
   fdr                0.05
   seed               42
+  signed_fraction    1.0          1.0 = all DE features go up, 0.5 = balanced
+  class_map_path     ""           TSV with feature_id, class_id columns
+  class_weights      {}           named map {class_id: weight}; needs class_map
 """
 
 import os.path as op
@@ -47,6 +58,7 @@ rule de_simulations:
         summary_tsv = op.join(_outdir, 'de_simulations_summary.tsv'),
         results_rds = op.join(_outdir, 'de_simulations_results.rds'),
         heatmap_pdf = op.join(_outdir, 'de_simulations_heatmap.pdf'),
+        recovered_logfc_tsv = op.join(_outdir, 'de_simulations_recovered_logfc.tsv.gz'),
     params:
         outdir = _outdir,
         metadata = _de.get('metadata', ''),
@@ -63,6 +75,10 @@ rule de_simulations:
         k_max = _de.get('k_max', 4),
         n_controls = _de.get('n_controls', 200),
         fdr = _de.get('fdr', 0.05),
+        signed_fraction = _de.get('signed_fraction', 1.0),
+        class_map_path = _de.get('class_map_path', ''),
+        class_map_granularity = _de.get('class_map_granularity', 'family_id'),
+        class_weights = _de.get('class_weights', {}),
     log:
         op.join(config['base'], 'logs', 'de_simulations.log'),
     benchmark:
@@ -83,6 +99,7 @@ rule render_de_simulations_report:
         summary_tsv = op.join(_outdir, 'de_simulations_summary.tsv'),
         results_rds = op.join(_outdir, 'de_simulations_results.rds'),
         heatmap_pdf = op.join(_outdir, 'de_simulations_heatmap.pdf'),
+        recovered_logfc_tsv = op.join(_outdir, 'de_simulations_recovered_logfc.tsv.gz'),
     output:
         html = op.join(_outdir, 'de_simulations_report.html'),
     params:
@@ -108,5 +125,6 @@ def de_simulation_outputs():
         op.join(_outdir, 'de_simulations_summary.tsv'),
         op.join(_outdir, 'de_simulations_results.rds'),
         op.join(_outdir, 'de_simulations_heatmap.pdf'),
+        op.join(_outdir, 'de_simulations_recovered_logfc.tsv.gz'),
         op.join(_outdir, 'de_simulations_report.html'),
     ]

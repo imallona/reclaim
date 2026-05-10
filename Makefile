@@ -21,7 +21,8 @@ NOISE_REPORT_CHR := $(RESULTS)/noise_sweep_chromium.html
         noise_smartseq2 noise_smartseq2_0pct noise_smartseq2_1pct noise_smartseq2_5pct noise_smartseq2_10pct \
         noise_chromium noise_chromium_0pct noise_chromium_1pct noise_chromium_5pct noise_chromium_10pct \
         report_noise_smartseq2 report_noise_chromium reports_noise \
-        de_polymenidou_bulk \
+        de_polymenidou_bulk de_coordinated_derepression \
+        external_benchmark_smartseq2 external_benchmark_chromium \
         help
 
 # -----------------------------------------------------------------------
@@ -99,6 +100,21 @@ reports_noise: report_noise_smartseq2 report_noise_chromium
 de_polymenidou_bulk:
 	$(SM) --configfile configs/de_simulations_polymenidou_bulk.yaml
 
+de_coordinated_derepression:
+	$(SM) --configfile configs/de_simulations_coordinated_derepression.yaml
+
+# -----------------------------------------------------------------------
+# External tool benchmark (TEtranscripts, scTE, optional SQuIRE)
+# requires the corresponding base simulation to have been run first so the
+# STAR-aligned BAMs and ground truth exist
+# -----------------------------------------------------------------------
+
+external_benchmark_smartseq2:
+	$(SM) --configfile configs/external_benchmark_smartseq2.yaml
+
+external_benchmark_chromium:
+	$(SM) --configfile configs/external_benchmark_chromium.yaml
+
 # -----------------------------------------------------------------------
 # all
 # -----------------------------------------------------------------------
@@ -128,7 +144,16 @@ help:
 	@echo "  reports_noise                    both noise sweep reports"
 	@echo ""
 	@echo "DE library size and normalization check:"
-	@echo "  de_polymenidou_bulk              count-level RUV power benchmark for the gse230647 bulk gene/repeat counts"
+	@echo "  de_polymenidou_bulk              default scenario: count-level power benchmark for the gse230647 bulk gene/repeat counts"
 	@echo "                                   (TSV/RDS, heatmap PDF, and HTML report under results/de_simulations_polymenidou_bulk/de_simulations/)"
+	@echo "  de_coordinated_derepression      coordinated-derepression scenario: large fraction of repeats moving in same direction;"
+	@echo "                                   tests TMM-on-repeats compression vs gene-library-size transfer (recovered-vs-input logFC)"
+	@echo "                                   (outputs under results/de_simulations_coordinated_derepression/de_simulations/)"
+	@echo ""
+	@echo "External tool benchmark (TEtranscripts, scTE, optional SQuIRE):"
+	@echo "  external_benchmark_smartseq2     run TEtranscripts on the SmartSeq2 simulation BAMs and score against ground truth"
+	@echo "                                   (outputs under results/simulation_smartseq2/external_benchmark/)"
+	@echo "  external_benchmark_chromium      run scTE on the Chromium simulation BAM and score against ground truth"
+	@echo "                                   (outputs under results/simulation_chromium/external_benchmark/)"
 	@echo ""
 	@echo "  all                              run everything in sequence"

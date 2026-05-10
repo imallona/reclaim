@@ -37,10 +37,11 @@ The question is pragmatic: at which combinations of gene and repeat depth does e
 ## Inputs
 
 ```{r load-data}
-results_path <- file.path(de_dir, "de_simulations_results.tsv")
-summary_path <- file.path(de_dir, "de_simulations_summary.tsv")
-rds_path     <- file.path(de_dir, "de_simulations_results.rds")
-heatmap_pdf  <- file.path(de_dir, "de_simulations_heatmap.pdf")
+results_path   <- file.path(de_dir, "de_simulations_results.tsv")
+summary_path   <- file.path(de_dir, "de_simulations_summary.tsv")
+rds_path       <- file.path(de_dir, "de_simulations_results.rds")
+heatmap_pdf    <- file.path(de_dir, "de_simulations_heatmap.pdf")
+recovered_path <- file.path(de_dir, "de_simulations_recovered_logfc.tsv.gz")
 
 stopifnot(file.exists(results_path), file.exists(summary_path))
 
@@ -49,10 +50,21 @@ summary_df <- read_tsv(summary_path, show_col_types = FALSE)
 
 run_meta <- if (file.exists(rds_path)) readRDS(rds_path) else NULL
 
-method_levels <- c("none", "TMM",
-                   sort(grep("^RUVg_k", unique(results$method), value = TRUE)))
+recovered_df <- if (file.exists(recovered_path))
+                  read_tsv(recovered_path, show_col_types = FALSE) else NULL
+
+ordered_methods <- function(method_strings) {
+  ms <- unique(method_strings)
+  base_order <- intersect(c("none", "TMM", "gene_lib"), ms)
+  ruv <- sort(grep("^RUVg_k", ms, value = TRUE))
+  c(base_order, ruv, setdiff(ms, c(base_order, ruv)))
+}
+method_levels <- ordered_methods(results$method)
 results$method <- factor(results$method, levels = method_levels)
 summary_df$method <- factor(summary_df$method, levels = method_levels)
+if (!is.null(recovered_df)) {
+  recovered_df$method <- factor(recovered_df$method, levels = method_levels)
+}
 
 n_planted <- if (!is.null(run_meta) && !is.null(run_meta$params$n_de_repeats))
                as.integer(run_meta$params$n_de_repeats) else NA_integer_
@@ -93,6 +105,22 @@ if (!is.null(run_meta) && !is.null(run_meta$params)) {
               paste(unlist(p$repeat_lib_grid), collapse = ", ")))
   cat(sprintf("- RUVg k_max: %s, n_controls: %s\n", p$k_max, p$n_controls))
   cat(sprintf("- FDR threshold: %s\n", p$fdr))
+  if (!is.null(p$signed_fraction)) {
+    cat(sprintf("- signed_fraction: %s (1.0 = coordinated, 0.5 = balanced)\n",
+                p$signed_fraction))
+  }
+  if (!is.null(p$class_map_path) && nzchar(p$class_map_path)) {
+    cat(sprintf("- class_map_path: %s (granularity: %s)\n",
+                p$class_map_path,
+                if (!is.null(p$class_map_granularity)) p$class_map_granularity
+                else "family_id"))
+    if (!is.null(p$class_weights) && length(p$class_weights) > 0) {
+      cw <- p$class_weights
+      if (is.list(cw)) cw <- unlist(cw)
+      cat(sprintf("- class_weights: %s\n",
+                  paste(names(cw), cw, sep = "=", collapse = ", ")))
+    }
+  }
 }
 ```
 
@@ -311,6 +339,88 @@ results %>%
 ```
 
 How to read this. Each dot is one simulation replicate; the black bar is the mean. Tall vertical scatter at a given (method, cell) means the heatmap average is averaging over a bimodal outcome (often "always succeeds" vs "always fails" depending on planted feature draw), and the heatmap point estimate is less reliable. Use this plot to decide where to bump n_iter.
+
+## Recovered vs planted logFC: TMM compression test
+
+This section is the headline panel for the coordinated-derepression scenario. Under the default scenario (small fraction DE, mixed direction) it acts as a sanity check: every method should sit on the y = x line. Under the coordinated-derepression scenario (`signed_fraction = 1.0` and a high `n_de_repeats`) the gap between methods opens up: TMM-on-repeats compresses recovered logFC because its size factors absorb the coordinated signal, while gene-library-size transfer does not.
+
+```{r recovered-logfc-bias, fig.width=11, fig.height=4}
+if (is.null(recovered_df)) {
+  cat("Recovered-logFC TSV not found; skipping bias panel.\n")
+} else {
+  planted_only <- recovered_df %>%
+    filter(planted, !is.na(recovered_logfc)) %>%
+    mutate(planted_logfc = as.numeric(planted_logfc),
+           recovered_logfc = as.numeric(recovered_logfc))
+  stopifnot(nrow(planted_only) > 0)
+
+  canonical_g_bias <- 1
+  canonical_r_bias <- 1
+  has_canonical <- canonical_g_bias %in% planted_only$gene_lib_scale &&
+                   canonical_r_bias %in% planted_only$repeat_lib_scale
+  cell_df <- if (has_canonical) {
+    planted_only %>%
+      filter(gene_lib_scale == canonical_g_bias,
+             repeat_lib_scale == canonical_r_bias)
+  } else planted_only
+
+  bias_slopes <- cell_df %>%
+    group_by(method) %>%
+    summarise(
+      slope = if (length(unique(planted_logfc)) >= 2 &&
+                  sum(!is.na(recovered_logfc)) >= 5)
+                coef(lm(recovered_logfc ~ planted_logfc))[2]
+              else NA_real_,
+      mean_recovered = mean(recovered_logfc, na.rm = TRUE),
+      n = sum(!is.na(recovered_logfc)),
+      .groups = "drop")
+
+  print(knitr::kable(
+    bias_slopes,
+    caption = sprintf(
+      "Bias slope at gene_lib_scale=%s, repeat_lib_scale=%s. Slope close to 1 means unbiased recovery; slope < 1 means compression.",
+      canonical_g_bias, canonical_r_bias),
+    digits = 3))
+
+  ggplot(cell_df,
+         aes(x = planted_logfc, y = recovered_logfc, colour = method)) +
+    geom_hline(yintercept = 0, colour = "grey80") +
+    geom_vline(xintercept = 0, colour = "grey80") +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed",
+                colour = "grey50") +
+    geom_point(alpha = 0.3, size = 0.6) +
+    geom_smooth(method = "lm", se = FALSE, formula = y ~ x, linewidth = 0.6) +
+    facet_wrap(~ method, nrow = 1) +
+    labs(x = "planted logFC",
+         y = "recovered logFC",
+         title = "Recovered vs planted logFC at the canonical depth cell",
+         subtitle = "Dashed line is y = x (unbiased recovery)") +
+    theme_minimal() +
+    theme(legend.position = "none")
+}
+```
+
+How to read this. The dashed diagonal is unbiased recovery: each planted feature gets back what was put in. A method whose smoother sits below the diagonal is compressing; a method whose smoother sits on the diagonal is unbiased. The slope estimates printed in the table are the headline numbers used in the manuscript Fig 3A.
+
+```{r recovered-logfc-by-class, fig.width=11, fig.height=5}
+if (!is.null(recovered_df) && "class_id" %in% colnames(recovered_df)) {
+  cls_df <- recovered_df %>%
+    filter(planted, !is.na(recovered_logfc), !is.na(class_id))
+  if (nrow(cls_df) > 0) {
+    ggplot(cls_df, aes(x = class_id, y = recovered_logfc, colour = method)) +
+      geom_hline(aes(yintercept = unique(planted_logfc)), linetype = "dashed",
+                 colour = "grey50") +
+      geom_boxplot(outlier.size = 0.4, alpha = 0.7) +
+      labs(x = NULL, y = "recovered logFC",
+           title = "Recovered logFC by RepeatMasker class, per method",
+           subtitle = "Dashed line is the planted logFC; methods that sit below are compressing") +
+      theme_minimal() +
+      theme(axis.text.x = element_text(angle = 30, hjust = 1))
+  }
+}
+```
+
+How to read this. When biology-weighted selection is on, each class boxplot summarises only the picked classes. Methods whose box stays at the dashed line are unbiased on that class; methods whose box collapses toward zero are compressing on that class. Class differences in compression are diagnostic: TMM compresses more on classes that contributed more to the coordinated signal.
 
 ## Method ranking at the canonical cell
 

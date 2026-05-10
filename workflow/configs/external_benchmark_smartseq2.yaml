@@ -1,0 +1,78 @@
+## External-tool benchmark on the SmartSeq2 simulation.
+## Consumes per-cell BAMs already produced by simulation_smartseq2.yaml at
+## results/simulation_smartseq2/starsolo/smartseq2/<cell_NNN>/unique_repeats/Aligned.sortedByCoord.out.bam
+## and the canonical ground truth at
+## results/simulation_smartseq2/simulations/smartseq2/ground_truth.tsv.
+##
+## Set external_tools to the subset of tools you want to score. TEtranscripts
+## is the bulk-natural choice for SmartSeq2 (per-cell counts treated as
+## per-sample bulk replicates). SQuIRE is optional; drop it from the list
+## when its pinned conda env fails to install on the target machine.
+
+base: "../results/simulation_smartseq2"
+indices_base: "../results/shared"
+
+pipeline_type: simulation
+
+reference:
+  assembly: hg38
+  ensembl_release: "112"
+  chromosomes: ["chr10"]
+  filter_genic: true
+  rmsk_source: ucsc_flatfile
+  genome_fasta: "../results/shared/refs/GRCh38.dna.primary_assembly.fa.gz"
+  repeats_gtf: "../results/shared/refs/hg38_rmsk_TE.gtf.gz"
+  genes_gtf: "../results/shared/refs/GRCh38.112.genes.gtf.gz"
+
+simulation:
+  technology: smartseq2
+  n_cells: 100
+  n_expressed_per_cell: 500
+  read_length: 90
+  seed: 42
+  mutation_rate: 0.001
+
+feature_sets:
+  - repeats
+  - genes
+  - genic_repeats
+  - intergenic_repeats
+
+aligners:
+  - starsolo
+
+aligner_params:
+  starsolo:
+    multimapper_modes: ["unique"]
+    extra_args: ""
+
+granularities:
+  - gene_id
+  - family_id
+  - class_id
+
+resources:
+  max_threads: 10
+  max_mem_mb: 20000
+
+## Activate the external benchmark module via the gate in workflow/Snakefile.
+external_benchmark: true
+external_tools:
+  - tetranscripts
+  ## - squire   ## uncomment if SQuIRE installs cleanly on the target
+external_samples:
+  - cell_001
+  - cell_002
+  - cell_003
+  - cell_004
+  - cell_005
+  - cell_006
+  - cell_007
+  - cell_008
+  - cell_009
+  - cell_010
+external_granularities:
+  - gene_id
+  - family_id
+  - class_id
+external_min_overlap_fraction: 0.05

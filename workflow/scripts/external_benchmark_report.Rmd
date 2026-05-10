@@ -1,0 +1,188 @@
+---
+title: "REclaim vs external repeat tools: benchmark on simulated data"
+author: "Izaskun Mallona"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: flatly
+    toc: true
+    toc_float: true
+    code_folding: hide
+params:
+  ext_dir: "."
+  reclaim_eval_dir: "."
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 9, fig.height = 5)
+suppressPackageStartupMessages({
+  library(ggplot2)
+  library(dplyr)
+  library(tidyr)
+  library(readr)
+  library(scales)
+})
+
+ext_dir <- params$ext_dir
+reclaim_eval_dir <- params$reclaim_eval_dir
+```
+
+## What this report shows
+
+Side-by-side accuracy of REclaim's quantifiers (STARsolo unique, kallisto, alevin, bowtie2) and external tools (TEtranscripts, scTE, optionally SQuIRE) on the same simulated dataset, scored against the same per-locus ground truth at the same granularities. Every number is comparable: same fastqs, same BAMs, same locus_map, same evaluate.py.
+
+```{r load-data}
+ext_summary_path <- file.path(ext_dir, "summary_global_metrics.tsv")
+reclaim_summary_path <- file.path(reclaim_eval_dir, "summary_global_metrics.tsv")
+stopifnot(file.exists(ext_summary_path))
+stopifnot(file.exists(reclaim_summary_path))
+
+ext_df <- read_tsv(ext_summary_path, show_col_types = FALSE)
+reclaim_df <- read_tsv(reclaim_summary_path, show_col_types = FALSE)
+
+ext_df$source <- "external"
+reclaim_df$source <- "reclaim"
+shared_cols <- intersect(colnames(ext_df), colnames(reclaim_df))
+combined <- bind_rows(
+  reclaim_df[, shared_cols],
+  ext_df[, shared_cols])
+
+stopifnot(nrow(combined) > 0)
+combined <- combined %>%
+  mutate(across(any_of(c("pearson_r", "spearman_r", "log1p_rmse",
+                         "precision", "recall", "f1", "jaccard", "specificity",
+                         "wall_time_s", "max_rss_mb", "mutation_rate")),
+                ~ suppressWarnings(as.numeric(.))))
+```
+
+```{r show-rows}
+combined %>%
+  arrange(source, aligner, granularity) %>%
+  knitr::kable()
+```
+
+## Pearson r against ground truth
+
+```{r pearson, fig.width=10, fig.height=4}
+p_df <- combined %>% filter(!is.na(pearson_r))
+ggplot(p_df, aes(x = aligner, y = pearson_r, fill = source)) +
+  geom_col(position = position_dodge2(preserve = "single")) +
+  facet_wrap(~ granularity, nrow = 1) +
+  geom_text(aes(label = sprintf("%.3f", pearson_r)),
+            position = position_dodge2(width = 0.9, preserve = "single"),
+            vjust = -0.3, size = 3) +
+  scale_y_continuous(limits = c(NA, 1.05)) +
+  labs(x = NULL, y = "Pearson r vs ground truth",
+       fill = NULL,
+       title = "Per-quantifier Pearson r against ground truth, by granularity") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+```
+
+How to read this. Bars at or near 1 are near-perfect quantifiers. The colour split (REclaim vs external) is the headline: a REclaim aligner that matches or beats the external tool at the same granularity is the result we want to see in the manuscript Fig 2 panel. A clear ranking in any panel is publication-ready; a tie or REclaim-loses outcome is a result too and gets noted in the discussion.
+
+## Sensitivity (recall)
+
+```{r recall, fig.width=10, fig.height=4}
+ggplot(combined %>% filter(!is.na(recall)),
+       aes(x = aligner, y = recall, fill = source)) +
+  geom_col(position = position_dodge2(preserve = "single")) +
+  facet_wrap(~ granularity, nrow = 1) +
+  scale_y_continuous(limits = c(0, 1.05)) +
+  labs(x = NULL, y = "recall (TP / (TP+FN))",
+       fill = NULL,
+       title = "Per-quantifier recall, by granularity") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+```
+
+## Specificity
+
+```{r specificity, fig.width=10, fig.height=4}
+ggplot(combined %>% filter(!is.na(specificity)),
+       aes(x = aligner, y = specificity, fill = source)) +
+  geom_col(position = position_dodge2(preserve = "single")) +
+  facet_wrap(~ granularity, nrow = 1) +
+  scale_y_continuous(limits = c(0, 1.05)) +
+  labs(x = NULL, y = "specificity (TN / (TN+FP))",
+       fill = NULL,
+       title = "Per-quantifier specificity, by granularity") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+```
+
+## Per-class breakdown
+
+```{r per-class, fig.width=11, fig.height=6}
+collect_per_class <- function(dir_path, label) {
+  files <- list.files(dir_path,
+                      pattern = "_per_family_metrics\\.tsv$",
+                      recursive = TRUE, full.names = TRUE)
+  if (!length(files)) return(NULL)
+  rows <- lapply(files, function(p) {
+    tryCatch(read_tsv(p, show_col_types = FALSE), error = function(e) NULL)
+  })
+  rows <- rows[!sapply(rows, is.null)]
+  if (!length(rows)) return(NULL)
+  bind_rows(rows) %>% mutate(source = label)
+}
+
+per_class <- bind_rows(
+  collect_per_class(reclaim_eval_dir, "reclaim"),
+  collect_per_class(ext_dir, "external"))
+
+if (!is.null(per_class) && nrow(per_class) > 0) {
+  per_class$pearson_r <- suppressWarnings(as.numeric(per_class$pearson_r))
+  ggplot(per_class %>% filter(!is.na(pearson_r), !is.na(class_id)),
+         aes(x = class_id, y = pearson_r, fill = source)) +
+    geom_col(position = position_dodge2(preserve = "single")) +
+    facet_grid(granularity ~ aligner, scales = "free_x") +
+    scale_y_continuous(limits = c(NA, 1.05)) +
+    labs(x = NULL, y = "Pearson r per class",
+         fill = NULL,
+         title = "Per-class Pearson r, faceted by quantifier and granularity") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+} else {
+  cat("No per-family metrics files found; skipping per-class panel.\n")
+}
+```
+
+How to read this. Each panel column is one quantifier. Each subpanel row is a granularity. Within a panel, the bars are RepeatMasker classes. A quantifier that maintains high Pearson r across all classes is robust; a quantifier that collapses on a specific class points to that class being mishandled (often LTR for tools that ignore long internal sequences, or simple repeats for tools that filter low-complexity).
+
+## Compute cost
+
+```{r runtime, fig.width=10, fig.height=4}
+cost_df <- combined %>%
+  filter(!is.na(wall_time_s)) %>%
+  distinct(aligner, source, wall_time_s, max_rss_mb)
+
+if (nrow(cost_df) > 0) {
+  ggplot(cost_df,
+         aes(x = aligner, y = wall_time_s, fill = source)) +
+    geom_col(position = position_dodge2(preserve = "single")) +
+    labs(x = NULL, y = "wall-clock seconds",
+         fill = NULL,
+         title = "Per-tool runtime on the simulated dataset") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 30, hjust = 1))
+} else {
+  cat("No wall_time_s rows; runtime panel skipped.\n")
+}
+```
+
+## Tools skipped or stubbed
+
+```{r skipped, results='asis'}
+cat("- TEtranscripts: included; bulk only; treats each SmartSeq2 cell as one sample.\n")
+cat("- scTE: included; sc only; consumes the multi-cell Chromium STARsolo BAM.\n")
+cat("- SQuIRE: optional; pinned to Python 3.6 and STAR 2.5.3a; may fail to install on newer machines. When unavailable, the harmoniser asserts on missing overlap and SQuIRE is dropped from this report. See docs/external_tool_benchmark.md for the rationale and the install caveats.\n")
+cat("- REdiscoverTE: not included. It bundles a kallisto-based custom transcriptome that overlaps with REclaim's existing kallisto path; including it would require a parallel pseudoalignment branch outside the BAM-based comparison this report performs. Documented in docs/external_tool_benchmark.md.\n")
+```
+
+## Session info
+
+```{r session-info}
+sessionInfo()
+```
