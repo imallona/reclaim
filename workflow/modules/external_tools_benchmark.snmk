@@ -64,33 +64,60 @@ _harmonize_script = op.join(workflow.basedir, 'scripts',
 
 _locus_map = op.join(config['indices_base'], 'indices', genome_tag,
                      'repeats_locus_map.tsv')
-_repeats_gtf = op.join(config['indices_base'], 'indices', genome_tag,
-                       'repeats.gtf')
-_genes_gtf = op.join(config['indices_base'], 'indices', genome_tag,
-                     'genes.gtf')
+_repeats_gtf = op.join(config['indices_base'], 'tmp', 'repeats.gtf')
+_genes_gtf = op.join(config['indices_base'], 'tmp', 'genes.gtf')
 
 _ground_truth = op.join(config['base'], 'simulations', _sim_technology,
                         'ground_truth.tsv')
 
 
+_per_cell_bam_dir = op.join(_ext_outdir, 'per_cell_bams')
+_multi_cell_bam = op.join(config['base'], 'starsolo', _sim_technology,
+                          'unique_repeats', 'Aligned.sortedByCoord.out.bam')
+
+
 def _per_sample_bam(wildcards):
-    """SmartSeq2 has one BAM per cell; Chromium has a single multi-cell BAM
-    with CB tags. The wildcard {sample} disambiguates which we want."""
+    """SmartSeq2: per-cell BAM from split_smartseq2_per_cell_bams.
+    Chromium: the multi-cell BAM (scTE keys on CB tags directly)."""
     if _sim_technology == 'smartseq2':
-        return op.join(config['base'], 'starsolo', _sim_technology,
-                       wildcards.sample, 'unique_repeats',
-                       'Aligned.sortedByCoord.out.bam')
-    return op.join(config['base'], 'starsolo', _sim_technology,
-                   'unique_repeats', 'Aligned.sortedByCoord.out.bam')
+        return op.join(_per_cell_bam_dir, f'{wildcards.sample}.bam')
+    return _multi_cell_bam
 
 
 def _all_bams_for_tool():
     if _sim_technology == 'smartseq2':
-        return [op.join(config['base'], 'starsolo', _sim_technology, s,
-                        'unique_repeats', 'Aligned.sortedByCoord.out.bam')
-                for s in _ext_samples]
-    return [op.join(config['base'], 'starsolo', _sim_technology,
-                    'unique_repeats', 'Aligned.sortedByCoord.out.bam')]
+        return [op.join(_per_cell_bam_dir, f'{s}.bam') for s in _ext_samples]
+    return [_multi_cell_bam]
+
+
+rule split_smartseq2_per_cell_bams:
+    """Split the multi-cell SmartSeq2 BAM by @RG into per-cell BAMs so
+    bulk-style tools (TEcount, SQuIRE) can run one sample at a time."""
+    conda: op.join(workflow.basedir, 'envs', 'squire.yaml')
+    input:
+        bam = _multi_cell_bam,
+    output:
+        bams = temp(expand(op.join(_per_cell_bam_dir, '{sample}.bam'),
+                           sample=_ext_samples)),
+        bais = temp(expand(op.join(_per_cell_bam_dir, '{sample}.bam.bai'),
+                           sample=_ext_samples)),
+    params:
+        outdir = _per_cell_bam_dir,
+        samples = ' '.join(_ext_samples),
+    log:
+        op.join(config['base'], 'logs', 'split_smartseq2_per_cell_bams.log'),
+    benchmark:
+        op.join(config['base'], 'benchmarks',
+                'split_smartseq2_per_cell_bams.txt'),
+    threads: 4
+    shell:
+        r"""
+        mkdir -p {params.outdir}
+        for s in {params.samples}; do
+            samtools view -b -r $s {input.bam} > {params.outdir}/$s.bam
+            samtools index {params.outdir}/$s.bam
+        done 2> {log}
+        """
 
 
 # ----------------------------------------------------------------------
@@ -290,7 +317,6 @@ rule run_scte:
 _squire_root = op.join(_ext_outdir, 'squire')
 _squire_fetch_dir = op.join(_squire_root, 'fetch')
 _squire_clean_dir = op.join(_squire_root, 'clean')
-_squire_map_dir = op.join(_squire_root, 'map')
 _squire_count_dir = op.join(_squire_root, 'count')
 _squire_raw_dir = op.join(_squire_root, 'raw')
 
@@ -354,50 +380,28 @@ rule run_squire_clean:
             echo "squire Clean produced no output in {params.outdir}; check {log}" >&2
             exit 2
         fi
+        ## Strip 'chr' prefix from BEDs so they match the bare
+        ## chromosome names used by the rest of the pipeline (Ensembl).
+        find {params.outdir} -name '*.bed' -type f \
+            -exec sed -i 's/^chr//' {{}} +
         touch {output.marker}
         """
 
 
-rule stage_squire_bam:
-    """Symlink the existing STARsolo per-sample BAM into a SQuIRE map
-    folder and ensure a .bai sits next to it. SmartSeq2 only: SQuIRE is
-    bulk-style and treats each cell BAM as one sample. Uses the SQuIRE
-    conda env for samtools, which is already pulled for the Count rule."""
-    conda: op.join(workflow.basedir, 'envs', 'squire.yaml')
-    input:
-        bam = _per_sample_bam,
-    output:
-        bam = op.join(_squire_map_dir, '{sample}', '{sample}.bam'),
-        bai = op.join(_squire_map_dir, '{sample}', '{sample}.bam.bai'),
-    wildcard_constraints:
-        sample = '|'.join(_ext_samples) if _ext_samples else 'NEVER_MATCH',
-    log:
-        op.join(config['base'], 'logs', 'squire_stage_{sample}.log'),
-    shell:
-        r"""
-        mkdir -p $(dirname {output.bam})
-        ln -sf $(realpath {input.bam}) {output.bam}
-        if [ ! -f {input.bam}.bai ]; then
-            samtools index {input.bam} 2>> {log}
-        fi
-        ln -sf $(realpath {input.bam}).bai {output.bai}
-        """
-
-
 rule run_squire_count:
-    """Per-sample SQuIRE Count against the staged BAM. Produces
-    squire_count_<sample>.txt in a per-sample count folder."""
+    """Per-sample SQuIRE Count against the per-cell BAM produced by
+    split_smartseq2_per_cell_bams."""
     conda: op.join(workflow.basedir, 'envs', 'squire.yaml')
     input:
-        bam = op.join(_squire_map_dir, '{sample}', '{sample}.bam'),
-        bai = op.join(_squire_map_dir, '{sample}', '{sample}.bam.bai'),
+        bam = op.join(_per_cell_bam_dir, '{sample}.bam'),
+        bai = op.join(_per_cell_bam_dir, '{sample}.bam.bai'),
         fetch_marker = op.join(_squire_fetch_dir, '.done'),
         clean_marker = op.join(_squire_clean_dir, '.done'),
     output:
         per_sample = op.join(_squire_count_dir, '{sample}',
                              'squire_count_{sample}.txt'),
     params:
-        map_folder = op.join(_squire_map_dir, '{sample}'),
+        map_folder = _per_cell_bam_dir,
         fetch_dir = _squire_fetch_dir,
         clean_dir = _squire_clean_dir,
         out_folder = op.join(_squire_count_dir, '{sample}'),

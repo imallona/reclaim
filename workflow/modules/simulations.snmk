@@ -73,6 +73,7 @@ rule simulate_chromium:
         r1 = op.join(config['base'], 'simulations', 'chromium', 'R1.fastq.gz'),
         r2 = op.join(config['base'], 'simulations', 'chromium', 'R2.fastq.gz'),
         barcodes = op.join(config['base'], 'simulations', 'chromium', 'barcodes.txt'),
+        barcode_to_cell_id = op.join(config['base'], 'simulations', 'chromium', 'barcode_to_cell_id.tsv'),
         repeat_fasta = op.join(config['base'], 'simulations', 'chromium', 'simulated_repeats.fa')
     params:
         outdir = op.join(config['base'], 'simulations', 'chromium'),
