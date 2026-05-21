@@ -12,7 +12,7 @@ REclaim's evaluation report at `results/{sim}/evaluation/evaluation_report.html`
 |---|---|---|---|---|
 | TEtranscripts (TEcount) | bulk | subfamily (gene_id) | Most cited bulk tool. Per-cell SmartSeq2 BAMs are treated as per-sample bulk replicates of one group. | `workflow/envs/tetranscripts.yaml` |
 | scTE | single cell | family | The natural sc counterpart. Consumes a STARsolo BAM with CB and UB tags and emits a cell x family matrix. | `workflow/envs/scte.yaml` |
-| SQuIRE | bulk | locus | Optional: pinned to Python 3.6 and STAR 2.5.3a; the upstream is unmaintained. Drop it from the config when the conda env fails to build. | `workflow/envs/squire.yaml` |
+| SQuIRE | bulk | locus | Bulk locus-level counter. Pinned to Python 3.6 and STAR 2.5.3a; isolated in its own conda env so the version pin does not bleed into other rules. Reuses the existing STARsolo BAMs via a SQuIRE-shaped `map_folder` to keep the comparison apples-to-apples; `squire Map` is skipped. | `workflow/envs/squire.yaml` |
 
 ## Tools deliberately skipped
 
@@ -60,6 +60,16 @@ make external_benchmark_chromium CORES=N
 
 Outputs land at `results/simulation_smartseq2/external_benchmark/external_benchmark_report.html` and `results/simulation_chromium/external_benchmark/external_benchmark_report.html`.
 
+## Sample scope
+
+By default the benchmark scores every cell that the base simulation produced (cell_001 through cell_NNN, where NNN is `simulation.n_cells`). The snmk module fills this in automatically when `external_samples` is omitted from the config; supply an explicit list only to cap the cost of a re-run on a subset.
+
+For the SmartSeq2 benchmark this means TEcount runs once per cell BAM (n=NNN). For Chromium, scTE runs once on the multi-cell BAM and the harmoniser keeps only the requested cells in the output matrix.
+
+## Barcode to cell_id translation (Chromium)
+
+The Chromium simulation assigns a unique 16 nt barcode per simulated cell and writes the mapping to `results/simulation_chromium/simulations/chromium/barcode_to_cell_id.tsv`. scTE keys its h5ad `obs_names` on the BAM CB tag (the barcode), while REclaim's ground truth keys on `cell_id`. The harmoniser accepts `--barcode-map`; the snmk rule wires this file in automatically for the scTE Chromium path so the harmonised count matrix has cell_id columns rather than raw barcode columns.
+
 ## Harmonisation logic
 
 `harmonize_external_counts.py` accepts `--tool tetranscripts|scte|squire`, parses the tool-native format, and writes a feature_id x cell TSV.
@@ -68,7 +78,7 @@ For TEtranscripts, the feature ID is `subfamily:family:class`; the helper strips
 
 For scTE, the feature ID is family-level; gene_id rollup is not possible (the tool aggregates upstream of subfamily) so the harmoniser warns and emits family rows. Family and class outputs are exact.
 
-For SQuIRE, locus rows aggregate to subfamily then up to family or class via the locus_map.
+For SQuIRE, the pipeline is `squire Fetch` (one-shot UCSC reference and RepeatMasker download) -> `squire Clean` -> per-sample `squire Count` against staged STARsolo BAMs -> `squire_combine_counts.py` aggregation -> harmoniser. Locus rows aggregate to subfamily then up to family or class via the locus_map.
 
 Every map step counts dropped features. The drop-count is logged to stderr and visible in the snakemake log.
 

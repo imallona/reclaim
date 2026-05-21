@@ -163,7 +163,23 @@ def parse_tetranscripts_table(path, sample_columns):
     return dict(counts)
 
 
-def parse_scte_h5ad(path, sample_columns):
+def parse_barcode_map(path):
+    """Two-col TSV (barcode, cell_id). Header line is skipped. Returns
+    {barcode: cell_id}. Used by the scTE Chromium path to translate
+    BAM-side CB sequences into REclaim cell_id naming.
+    """
+    out = {}
+    with open_text(path) as fh:
+        fh.readline()
+        for line in fh:
+            parts = line.rstrip('\n').split('\t')
+            if len(parts) < 2:
+                continue
+            out[parts[0]] = parts[1]
+    return out
+
+
+def parse_scte_h5ad(path, sample_columns, barcode_map=None):
     """scTE emits a cell x feature AnnData. We expect one h5ad per
     'sample' (here: one per simulated cell), and concatenate them. Returns
     {family_id: {cell_id: count}}.
@@ -193,7 +209,8 @@ def parse_scte_h5ad(path, sample_columns):
         # 'is_TE' True; conservative path is to use all columns and let the
         # downstream locus_map mapping pick what is recognisable.
         var_names = list(a.var_names)
-        for cell_idx, cell_id in enumerate(a.obs_names):
+        for cell_idx, raw_id in enumerate(a.obs_names):
+            cell_id = barcode_map.get(raw_id, raw_id) if barcode_map else raw_id
             if sample_set and cell_id not in sample_set:
                 continue
             row = a.X[cell_idx]
@@ -296,6 +313,12 @@ def main():
     ap.add_argument('--min-overlap-fraction', type=float, default=0.05,
                     help='Asserts that this fraction of the tool feature IDs '
                          'maps to a known REclaim feature. Default 0.05.')
+    ap.add_argument('--barcode-map', default=None,
+                    help='Optional 2-col TSV (barcode, cell_id). When given and '
+                         '--tool=scte, scTE obs_names are translated through '
+                         'this map before --samples filtering. Required for '
+                         'the Chromium simulation, where CB tags are barcode '
+                         'sequences and the ground truth keys on cell_id.')
     ap.add_argument('--output', required=True)
     args = ap.parse_args()
 
@@ -313,8 +336,13 @@ def main():
         rolled, dropped = aggregate_to_granularity(
             per_feature, gene_to_family, gene_to_class, args.granularity)
     elif args.tool == 'scte':
-        # scTE feature_id is family-level by default
-        per_feature = parse_scte_h5ad(args.input, samples)
+        barcode_map = parse_barcode_map(args.barcode_map) if args.barcode_map else None
+        per_feature = parse_scte_h5ad(args.input, samples, barcode_map=barcode_map)
+        assert per_feature, (
+            'scTE harmonisation produced no rows: --samples filter excluded '
+            'every h5ad obs, or --barcode-map (if provided) did not match any '
+            'obs_names. Check the cell ids in --samples and the barcode/cell_id '
+            'pairs in --barcode-map against the h5ad obs_names.')
         check_overlap(list(per_feature.keys()), list(family_to_class.keys()),
                       args.min_overlap_fraction, 'family_id')
         if args.granularity == 'gene_id':

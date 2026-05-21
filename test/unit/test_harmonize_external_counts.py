@@ -220,3 +220,23 @@ def test_cli_end_to_end_tetranscripts(tmp_path):
     fam_rows = {r[0]: r[1:] for r in rows[1:]}
     assert fam_rows['Alu'] == ['12', '8']
     assert fam_rows['L1'] == ['0', '4']
+
+
+def test_parse_barcode_map_roundtrip(tmp_path):
+    p = tmp_path / 'bc.tsv'
+    write_tsv(p, [
+        ('barcode', 'cell_id'),
+        ('ACGTACGTACGTACGT', 'cell_001'),
+        ('TTTTGGGGAAAACCCC', 'cell_002'),
+    ])
+    out = hec.parse_barcode_map(str(p))
+    assert out == {
+        'ACGTACGTACGTACGT': 'cell_001',
+        'TTTTGGGGAAAACCCC': 'cell_002',
+    }
+
+
+def test_parse_barcode_map_skips_header_only(tmp_path):
+    p = tmp_path / 'empty_bc.tsv'
+    write_tsv(p, [('barcode', 'cell_id')])
+    assert hec.parse_barcode_map(str(p)) == {}
