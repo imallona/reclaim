@@ -305,17 +305,26 @@ rule run_scte:
     resources:
         mem_mb = config['resources']['max_mem_mb'],
     shell:
+        # scTE assumes -o is a bare basename: it builds its temp tree
+        # ('<o>_scTEtmp/') in the current working directory and re-injects -o
+        # into intermediate paths, so a directory in -o yields a broken nested
+        # path. Run from inside the output dir with absolute input/log paths.
         r"""
         mkdir -p {params.outdir}
+        bam=$(realpath {input.bam})
+        idx=$(realpath {input.idx})
+        logfile=$(realpath -m {log})
+        cd {params.outdir}
+        rm -rf {params.prefix}_scTEtmp
         scTE \
-            -i {input.bam} \
-            -o {params.outdir}/{params.prefix} \
-            -x {input.idx} \
+            -i "$bam" \
+            -o {params.prefix} \
+            -x "$idx" \
             -CB CB \
             -UMI UB \
             -p {threads} \
-            2> {log}
-        if [ ! -f {params.outdir}/{params.prefix}.h5ad ]; then
+            2> "$logfile"
+        if [ ! -f {params.prefix}.h5ad ]; then
             echo "scTE produced no h5ad output" >&2; exit 2
         fi
         """
