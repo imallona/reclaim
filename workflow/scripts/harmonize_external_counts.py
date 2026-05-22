@@ -343,6 +343,13 @@ def main():
             'every h5ad obs, or --barcode-map (if provided) did not match any '
             'obs_names. Check the cell ids in --samples and the barcode/cell_id '
             'pairs in --barcode-map against the h5ad obs_names.')
+        # scTE quantifies genes and TEs together; this benchmark scores repeats
+        # only. Keep the features that are repeat families known to the locus
+        # map and drop the gene features.
+        per_feature = {k: v for k, v in per_feature.items() if k in family_to_class}
+        assert per_feature, (
+            'no scTE feature matched a repeat family_id in the locus map; '
+            'check that the scTE index -te names use family_id')
         check_overlap(list(per_feature.keys()), list(family_to_class.keys()),
                       args.min_overlap_fraction, 'family_id')
         if args.granularity == 'gene_id':

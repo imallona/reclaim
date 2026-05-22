@@ -313,6 +313,7 @@ rule run_scte:
         # path. Run from inside the output dir with absolute input/log paths.
         # scTE's default cell filter (--min_genes 200) drops every simulated
         # cell, leaving no h5ad; keep all cells with at least min_genes feature.
+        # --hdf5 True makes scTE write the h5ad (default writes a csv instead).
         r"""
         mkdir -p {params.outdir}
         bam=$(realpath {input.bam})
@@ -328,6 +329,7 @@ rule run_scte:
             -UMI UB \
             --min_genes {params.min_genes} \
             --min_counts {params.min_counts} \
+            --hdf5 True \
             -p {threads} \
             2> "$logfile"
         if [ ! -f {params.prefix}.h5ad ]; then
