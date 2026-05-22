@@ -246,17 +246,21 @@ rule run_scte_index:
     """scTE_build in custom-annotation mode does not read a GTF for -te; it
     expects a 4-column TSV (chr, start, end, name). We convert the repeats
     GTF and use family_id as the name so scTE counts at family granularity,
-    matching what harmonize_external_counts.py expects for scte."""
+    matching what harmonize_external_counts.py expects for scte.
+
+    scTE_build appends '.<mode>.idx' to the -o value; the default mode is
+    exclusive, so the produced index file is scte_index.exclusive.idx."""
     conda: op.join(workflow.basedir, 'envs', 'scte.yaml')
     input:
         repeats_gtf = _repeats_gtf,
         genes_gtf = _genes_gtf,
     output:
-        idx = op.join(_ext_outdir, 'scte', 'index', 'scte_index.idx'),
+        idx = op.join(_ext_outdir, 'scte', 'index', 'scte_index.exclusive.idx'),
     params:
         outdir = op.join(_ext_outdir, 'scte', 'index'),
         genome = config.get('reference', {}).get('assembly', 'hg38'),
         te_bed = op.join(_ext_outdir, 'scte', 'index', 'repeats_scte.bed'),
+        idx_prefix = op.join(_ext_outdir, 'scte', 'index', 'scte_index'),
     log:
         op.join(config['base'], 'logs', 'scte_index.log'),
     benchmark:
@@ -277,7 +281,7 @@ rule run_scte_index:
             -g {params.genome} \
             -te {params.te_bed} \
             -gene {input.genes_gtf} \
-            -o {output.idx} \
+            -o {params.idx_prefix} \
             2> {log}
         """
 
@@ -287,7 +291,7 @@ rule run_scte:
     input:
         bam = op.join(config['base'], 'starsolo', _sim_technology,
                       'unique_repeats', 'Aligned.sortedByCoord.out.bam'),
-        idx = op.join(_ext_outdir, 'scte', 'index', 'scte_index.idx'),
+        idx = op.join(_ext_outdir, 'scte', 'index', 'scte_index.exclusive.idx'),
     output:
         h5ad = op.join(_ext_outdir, 'scte', 'raw', 'scte_counts.h5ad'),
     params:
