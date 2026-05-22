@@ -101,6 +101,10 @@ rule split_smartseq2_per_cell_bams:
                            sample=_ext_samples)),
         bais = temp(expand(op.join(_per_cell_bam_dir, '{sample}.bam.bai'),
                            sample=_ext_samples)),
+        unfixed = temp(expand(op.join(_per_cell_bam_dir, '{sample}.unfixed.bam'),
+                              sample=_ext_samples)),
+        headers = temp(expand(op.join(_per_cell_bam_dir, '{sample}.header.sam'),
+                              sample=_ext_samples)),
     params:
         outdir = _per_cell_bam_dir,
         samples = ' '.join(_ext_samples),
@@ -114,7 +118,20 @@ rule split_smartseq2_per_cell_bams:
         r"""
         mkdir -p {params.outdir}
         for s in {params.samples}; do
-            samtools view -b -r $s {input.bam} > {params.outdir}/$s.bam
+            samtools view -b -r $s {input.bam} > {params.outdir}/$s.unfixed.bam
+            # squire Count's is_paired() needs --readFilesIn in the @CO line,
+            # which STARsolo SmartSeq omits; rewrite it (two tokens = paired).
+            if [ $(samtools view -c -f 1 {params.outdir}/$s.unfixed.bam) -gt 0 ]; then
+                readfiles="r1.fastq r2.fastq"
+            else
+                readfiles="r1.fastq"
+            fi
+            samtools view -H {params.outdir}/$s.unfixed.bam | grep -v '^@CO' \
+                > {params.outdir}/$s.header.sam
+            printf '@CO\tuser command line: STAR --readFilesIn %s --outFileNamePrefix out/\n' \
+                "$readfiles" >> {params.outdir}/$s.header.sam
+            samtools reheader {params.outdir}/$s.header.sam \
+                {params.outdir}/$s.unfixed.bam > {params.outdir}/$s.bam
             samtools index {params.outdir}/$s.bam
         done 2> {log}
         """
