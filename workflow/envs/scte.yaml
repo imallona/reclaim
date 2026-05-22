@@ -18,4 +18,4 @@ dependencies:
   - h5py
   - scipy
   - pip:
-      - scTE==1.0.0
+      - git+https://github.com/JiekaiLab/scTE.git
