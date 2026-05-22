@@ -14,8 +14,10 @@ dependencies:
   - samtools
   - numpy
   - pandas
-  - anndata
   - h5py
   - scipy
   - pip:
+      ## scTE pins anndata loosely and the resolver lands on 0.6.x, which
+      ## imports the removed pandas.core.index. Pin a modern anndata.
+      - anndata==0.10.9
       - git+https://github.com/JiekaiLab/scTE.git
