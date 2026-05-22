@@ -243,6 +243,10 @@ rule aggregate_tetranscripts_benchmark:
 # ----------------------------------------------------------------------
 
 rule run_scte_index:
+    """scTE_build in custom-annotation mode does not read a GTF for -te; it
+    expects a 4-column TSV (chr, start, end, name). We convert the repeats
+    GTF and use family_id as the name so scTE counts at family granularity,
+    matching what harmonize_external_counts.py expects for scte."""
     conda: op.join(workflow.basedir, 'envs', 'scte.yaml')
     input:
         repeats_gtf = _repeats_gtf,
@@ -252,6 +256,7 @@ rule run_scte_index:
     params:
         outdir = op.join(_ext_outdir, 'scte', 'index'),
         genome = config.get('reference', {}).get('assembly', 'hg38'),
+        te_bed = op.join(_ext_outdir, 'scte', 'index', 'repeats_scte.bed'),
     log:
         op.join(config['base'], 'logs', 'scte_index.log'),
     benchmark:
@@ -259,9 +264,18 @@ rule run_scte_index:
     shell:
         r"""
         mkdir -p {params.outdir}
+        awk -F'\t' '$0 !~ /^#/ {{
+            attr = $9
+            start = index(attr, "family_id \"")
+            if (start > 0) {{
+                rest = substr(attr, start + 11)
+                stop = index(rest, "\"")
+                print $1"\t"$4"\t"$5"\t"substr(rest, 1, stop - 1)
+            }}
+        }}' {input.repeats_gtf} > {params.te_bed}
         scTE_build \
             -g {params.genome} \
-            -te {input.repeats_gtf} \
+            -te {params.te_bed} \
             -gene {input.genes_gtf} \
             -o {output.idx} \
             2> {log}

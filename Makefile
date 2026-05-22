@@ -5,7 +5,7 @@ WF      := workflow
 RESULTS := results
 
 CONDA_RUN := source ~/miniconda3/etc/profile.d/conda.sh && conda activate snakemake &&
-SM        := cd $(WF) && $(CONDA_RUN) snakemake --use-conda --cores $(CORES) --rerun-triggers mtime
+SM        := cd $(WF) && $(CONDA_RUN) ulimit -Sv 209715200 && snakemake --use-conda --cores $(CORES) --rerun-triggers mtime
 SM_REPORT := cd $(WF) && $(CONDA_RUN) snakemake -s Snakefile_noise_report --use-conda --cores 1
 
 # noise sweep eval dirs (relative to workflow/, comma-separated for the Rmd param)
