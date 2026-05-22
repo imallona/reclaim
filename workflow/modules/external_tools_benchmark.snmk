@@ -297,6 +297,8 @@ rule run_scte:
     params:
         outdir = op.join(_ext_outdir, 'scte', 'raw'),
         prefix = 'scte_counts',
+        min_genes = config.get('scte', {}).get('min_genes', 1),
+        min_counts = config.get('scte', {}).get('min_counts', 1),
     log:
         op.join(config['base'], 'logs', 'scte.log'),
     benchmark:
@@ -309,6 +311,8 @@ rule run_scte:
         # ('<o>_scTEtmp/') in the current working directory and re-injects -o
         # into intermediate paths, so a directory in -o yields a broken nested
         # path. Run from inside the output dir with absolute input/log paths.
+        # scTE's default cell filter (--min_genes 200) drops every simulated
+        # cell, leaving no h5ad; keep all cells with at least min_genes feature.
         r"""
         mkdir -p {params.outdir}
         bam=$(realpath {input.bam})
@@ -322,6 +326,8 @@ rule run_scte:
             -x "$idx" \
             -CB CB \
             -UMI UB \
+            --min_genes {params.min_genes} \
+            --min_counts {params.min_counts} \
             -p {threads} \
             2> "$logfile"
         if [ ! -f {params.prefix}.h5ad ]; then
