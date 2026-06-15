@@ -60,8 +60,16 @@ phase3:
   k_selected: 1
   min_cells_per_perturbation_col: 50
 
+# Neuro essential-gene panel: a second perturbation set selected by gene
+# symbol. gene_list is relative to paper/scripts; first column is the symbol.
+neuro:
+  gene_list: "neuro_gene_categories.tsv"
+  mode_use: "multi"
+  fdr_threshold: 0.05
+
 resources:
   download_mem_mb: 1000
   select_mem_mb: 8000
   resolve_sra_mem_mb: 4000
   ruv_mem_mb: 32000
+  browse_mem_mb: 8000

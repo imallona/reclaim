@@ -148,12 +148,50 @@ def parse_gemgroup_subset(s):
     return sorted({int(x) for x in s.split(",") if x.strip()})
 
 
+def read_gene_list(path):
+    genes = []
+    with open(path) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            sym = line.split("\t")[0].strip()
+            if sym.lower() == "gene":
+                continue
+            genes.append(sym)
+    return set(genes)
+
+
+def pick_by_gene_list(sc, gt_bulk, te_ratio, gene_list_path):
+    wanted = read_gene_list(gene_list_path)
+    gt = sc["gene_transcript"]
+    gn = sc["gene"]
+    is_control = np.array(["non-targeting" in x.lower() for x in gt])
+    mask = np.isin(gn, list(wanted)) & ~is_control
+    sel_gt, counts = np.unique(gt[mask], return_counts=True)
+    te_map = dict(zip(gt_bulk, te_ratio))
+    return [
+        {
+            "gene_transcript": g,
+            "replogle_te_ratio": float(te_map.get(g, float("nan"))),
+            "n_cells_replogle": int(c),
+        }
+        for g, c in zip(sel_gt, counts)
+    ]
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--bulk", required=True)
     p.add_argument("--singlecell", required=True)
     p.add_argument("--manifest", required=True)
-    p.add_argument("--top-n", type=int, required=True)
+    p.add_argument("--top-n", type=int, default=0,
+                   help="top N perturbations by TE_ratio; ignored when "
+                        "--gene-list is given")
+    p.add_argument("--gene-list", default="",
+                   help="file with one gene symbol per line (or a tsv whose "
+                        "first column is the symbol); selects those genes' "
+                        "perturbations instead of top-N by TE_ratio")
     p.add_argument("--n-controls", type=int, required=True)
     p.add_argument("--min-cells", type=int, required=True)
     p.add_argument("--seed", type=int, required=True)
@@ -168,14 +206,20 @@ def main():
 
     print("Loading bulk h5ad", file=sys.stderr)
     gt_bulk, te_ratio, num_cells = load_bulk(args.bulk, args.min_cells)
-    top_perts = pick_top_n(gt_bulk, te_ratio, num_cells, args.top_n)
-    print(f"  picked top {len(top_perts)} perturbations "
-          f"(min_cells>={args.min_cells})", file=sys.stderr)
 
     print("Loading singlecell h5ad obs", file=sys.stderr)
     sc = load_singlecell_obs(args.singlecell)
     print(f"  {len(sc['cell_barcode'])} cells, "
           f"{len(np.unique(sc['gem_group']))} gemgroups", file=sys.stderr)
+
+    if args.gene_list:
+        top_perts = pick_by_gene_list(sc, gt_bulk, te_ratio, args.gene_list)
+        print(f"  gene-list selection: {len(top_perts)} perturbations",
+              file=sys.stderr)
+    else:
+        top_perts = pick_top_n(gt_bulk, te_ratio, num_cells, args.top_n)
+        print(f"  picked top {len(top_perts)} perturbations "
+              f"(min_cells>={args.min_cells})", file=sys.stderr)
 
     keep, n_top, n_ctrl = select_cells(
         sc, top_perts, args.n_controls, gemgroup_subset, args.seed)
