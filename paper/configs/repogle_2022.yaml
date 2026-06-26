@@ -49,10 +49,12 @@ sra:
   source_pattern: mRNA
 
 # Phase 3: per-perturbation pseudobulk RUVg DE.
-# starsolo_base points at the workflow-side alignment output; report
-# inputs are read from there.
+# Phase 2 ran in tagcount mode, so genes are under starsolo_base and the
+# repeat featuresets under starsolo_tagcount_base. In per_featureset mode
+# leave starsolo_tagcount_base unset and all featuresets read from starsolo_base.
 phase3:
   starsolo_base: "../results/repogle_kd6_sc/starsolo"
+  starsolo_tagcount_base: "../results/repogle_kd6_sc/starsolo_tagcount"
   indices_base: "../results/shared"
   feature_sets: "genes genic_repeats intergenic_repeats"
   starsolo_modes: "unique multi"
