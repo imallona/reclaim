@@ -58,7 +58,9 @@ phase3:
   starsolo_modes: "unique multi"
   n_controls: 3000
   k_selected: 1
-  min_cells_per_perturbation_col: 50
+  # Min cells per (perturbation, gem_group) column, not per perturbation.
+  # Columns hold only a few cells each, so keep this small.
+  min_cells_per_perturbation_col: 3
 
 # Neuro essential-gene panel: a second perturbation set selected by gene
 # symbol. gene_list is relative to paper/scripts; first column is the symbol.

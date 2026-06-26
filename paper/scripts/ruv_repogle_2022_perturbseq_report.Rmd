@@ -231,6 +231,11 @@ build_pseudobulk <- function(mode, feature_set) {
   cells_per_col <- table(cells$pseudobulk_id)
   keep_cols <- intersect(colnames(out),
                           names(cells_per_col)[cells_per_col >= min_cells_per_col])
+  if (length(keep_cols) == 0) {
+    stop("no column passed min_cells_per_col=", min_cells_per_col, " for ",
+         mode, " ", feature_set, "; max cells per column is ",
+         max(cells_per_col), ". Lower min_cells_per_perturbation_col.")
+  }
   out <- out[, keep_cols, drop = FALSE]
 
   meta <- data.frame(
@@ -287,8 +292,12 @@ for (mode in starsolo_modes) {
                                       decreasing = TRUE)][seq_len(min(n_controls,
                                                                        nrow(ranked)))]
 
-  ruv_state <- fit_ruv_range(gene_dge, controls, k_max = max(4L, k_selected))
-  W <- pick_W_matrix(ruv_state, k = k_selected)
+  ruv_state <- fit_ruv_range(
+    genes_expr = gene_dge$counts, controls = controls,
+    pheno_df = data.frame(perturbed = meta$perturbed,
+                          row.names = meta$pseudobulk_id),
+    ks = seq_len(max(4L, k_selected)))
+  W <- pick_W_matrix(ruv_state$fits, k_selected, meta$pseudobulk_id)
   ruv_fits[[mode]] <- list(meta = meta, W = W, controls = controls,
                             gene_dge = gene_dge, ruv_state = ruv_state)
 }
@@ -377,6 +386,7 @@ for (mode in names(ruv_fits)) {
 save_rds(de_results, "de_results")
 
 de_long <- bind_rows(de_results)
+de_long$pert_id <- de_long$gene_transcript  # plot helpers key on pert_id
 
 bio_gene <- if (!is.null(biology_annotation)) {
   biology_annotation %>%
