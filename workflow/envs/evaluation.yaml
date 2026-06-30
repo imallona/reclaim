@@ -4,9 +4,12 @@ channels:
   - bioconda
 dependencies:
   # Also used for simulation rules (simulate_reads.py needs only stdlib + no extra deps)
-  - conda-forge::python>=3.10
+  # cap python: 3.14 has no complete anndata dependency build set
+  - conda-forge::python>=3.10,<3.13
   - conda-forge::pandas
   - conda-forge::scipy
   - conda-forge::numpy
   - conda-forge::matplotlib-base
   - conda-forge::seaborn
+  # anndata: harmonize_external reads scTE's h5ad output
+  - conda-forge::anndata

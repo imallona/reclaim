@@ -1,0 +1,426 @@
+---
+title: "Replogle 2022 Perturb-seq: repeat response by perturbation category"
+author: "Izaskun Mallona"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: flatly
+    toc: true
+    toc_float: true
+    code_folding: hide
+params:
+  de_long: "."
+  category_map: "."
+  report_outdir: "."
+  focus_mode: "unique"
+  modes: "unique multi"
+  feature_sets: "genic_repeats intergenic_repeats"
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+suppressPackageStartupMessages({
+  library(readr)
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+  library(ggrepel)
+  library(pheatmap)
+  library(patchwork)
+  library(vegan)
+})
+
+de_long_path <- params$de_long
+category_map_path <- params$category_map
+report_outdir <- params$report_outdir
+focus_mode <- params$focus_mode
+modes <- strsplit(params$modes, " ")[[1]]
+feature_sets <- strsplit(params$feature_sets, " ")[[1]]
+
+stopifnot(file.exists(de_long_path),
+          file.exists(category_map_path),
+          dir.exists(report_outdir),
+          length(focus_mode) == 1L, nzchar(focus_mode),
+          length(modes) >= 1L, length(feature_sets) >= 1L,
+          focus_mode %in% modes)
+
+save_rds <- function(obj, name) {
+  stopifnot(is.character(name), length(name) == 1L)
+  saveRDS(obj, file.path(report_outdir, paste0(name, ".rds")))
+}
+
+# Cap heatmap colour only; logFC values stay intact.
+FC_CLIP <- 3
+
+# Shared order and colours across panels.
+CATEGORY_LEVELS <- c("RNA_processing", "Transcription_core",
+                     "Unrelated")
+CATEGORY_COLORS <- c(RNA_processing = "#d95f02",
+                     Transcription_core = "#7570b3",
+                     Unrelated = "#999999")
+POLYA_COLORS <- c(`polyA-competent` = "#2166ac",
+                  `not polyA-competent` = "#b2182b",
+                  unknown = "grey80")
+DIVERGING <- colorRampPalette(c("#2166ac", "white", "#b2182b"))(100)
+DIVERGING_BREAKS <- seq(-FC_CLIP, FC_CLIP, length.out = 101)
+```
+
+Groups the selected Replogle 2022 perturbations into functional categories and asks whether the repeat response depends on the category. It uses the RUVg- and gemgroup-adjusted logFC from `ruv_de_long.csv`, so it avoids the depth and cell-count confounds that flatten the raw TE-fraction correlation.
+
+## Inputs and category assignment
+
+```{r load}
+de <- read_csv(de_long_path, show_col_types = FALSE)
+needed <- c("logFC", "FDR", "feature_id", "mode", "feature_set",
+            "granularity", "gene_transcript", "class_id", "polya")
+stopifnot(all(needed %in% names(de)))
+
+# Perturbation id is "<num>_<SYMBOL>_<...>".
+de$gene <- sub("^[0-9]+_([^_]+)_.*$", "\\1", de$gene_transcript)
+stopifnot(all(nzchar(de$gene)), !any(grepl("_", de$gene)))
+
+cat_map <- read_tsv(category_map_path, show_col_types = FALSE)
+stopifnot(all(c("gene", "category") %in% names(cat_map)),
+          !any(duplicated(cat_map$gene)),
+          all(cat_map$category %in% CATEGORY_LEVELS))
+
+de <- left_join(de, cat_map, by = "gene")
+unmapped <- sort(unique(de$gene[is.na(de$category)]))
+if (length(unmapped) > 0) {
+  stop("genes without a category in ", category_map_path, ": ",
+       paste(unmapped, collapse = ", "))
+}
+de$category <- factor(de$category, levels = CATEGORY_LEVELS)
+
+stopifnot(focus_mode %in% de$mode,
+          all(c("class_id", "family_id") %in% de$granularity))
+
+cat_lookup <- setNames(as.character(cat_map$category), cat_map$gene)
+
+# class to polyA competence, for the column annotation.
+polya_tab <- de %>%
+  filter(granularity == "class_id") %>%
+  distinct(feature_id, polya)
+stopifnot(!any(duplicated(polya_tab$feature_id)))
+polya_lookup <- setNames(as.character(polya_tab$polya), polya_tab$feature_id)
+polya_lookup[is.na(polya_lookup)] <- "unknown"
+
+n_per_cat <- de %>% distinct(gene, category) %>% count(category)
+knitr::kable(n_per_cat, caption = "Perturbations per category")
+save_rds(de, "de_annotated")
+```
+
+```{r helpers}
+# Long to matrix; duplicate cells averaged, gaps filled.
+long_to_matrix <- function(d, row_col, name_col, value_col, fill = 0) {
+  stopifnot(is.data.frame(d),
+            all(c(row_col, name_col, value_col) %in% names(d)),
+            nrow(d) > 0)
+  flat <- data.frame(r = as.character(d[[row_col]]),
+                     c = as.character(d[[name_col]]),
+                     v = as.numeric(d[[value_col]]),
+                     stringsAsFactors = FALSE)
+  wide <- pivot_wider(flat, names_from = c, values_from = v,
+                      values_fn = function(x) mean(x, na.rm = TRUE))
+  m <- as.matrix(wide[, -1, drop = FALSE])
+  rownames(m) <- wide[["r"]]
+  m[is.na(m)] <- fill
+  m
+}
+```
+
+## Per-perturbation class heatmap, clustered and annotated
+
+Perturbations by repeat classes; colour is logFC versus controls, both axes clustered. Side and top bars show category and polyA competence; stars mark FDR below 0.05.
+
+```{r class-heatmap, fig.width = 9, fig.height = 7}
+plot_class_heatmap <- function(d_class, title) {
+  stopifnot(nrow(d_class) > 0)
+  lfc <- long_to_matrix(d_class, "gene", "feature_id", "logFC", fill = 0)
+  fdr <- long_to_matrix(d_class, "gene", "feature_id", "FDR", fill = 1)
+  fdr <- fdr[rownames(lfc), colnames(lfc), drop = FALSE]
+  stopifnot(identical(dim(lfc), dim(fdr)))
+  stars <- ifelse(fdr < 0.05, "*", "")
+  lfc_clip <- pmax(pmin(lfc, FC_CLIP), -FC_CLIP)
+
+  complex_of <- cat_lookup[rownames(lfc)]
+  stopifnot(!anyNA(complex_of))
+  row_ann <- data.frame(complex = factor(complex_of, levels = CATEGORY_LEVELS))
+  rownames(row_ann) <- rownames(lfc)
+
+  polya_of <- polya_lookup[colnames(lfc)]
+  polya_of[is.na(polya_of)] <- "unknown"
+  col_ann <- data.frame(polyA = factor(polya_of, levels = names(POLYA_COLORS)))
+  rownames(col_ann) <- colnames(lfc)
+
+  pheatmap(lfc_clip, color = DIVERGING, breaks = DIVERGING_BREAKS,
+           display_numbers = stars, number_color = "black",
+           fontsize_number = 9,
+           annotation_row = row_ann, annotation_col = col_ann,
+           annotation_colors = list(complex = CATEGORY_COLORS,
+                                    polyA = POLYA_COLORS),
+           clustering_method = "ward.D2",
+           main = title, fontsize_row = 8, fontsize_col = 9,
+           border_color = NA)
+}
+
+for (fs in feature_sets) {
+  d_class <- de %>%
+    filter(mode == focus_mode, feature_set == fs, granularity == "class_id")
+  if (nrow(d_class) == 0) {
+    cat(sprintf("\nno class_id rows for %s / %s; skipped\n", focus_mode, fs))
+    next
+  }
+  cat(sprintf("\n### %s / %s\n\n", focus_mode, fs))
+  plot_class_heatmap(d_class, paste(focus_mode, fs, "class logFC"))
+}
+```
+
+## Category-aggregate class heatmap
+
+logFC collapsed to one row per category (median across its perturbations). Rows kept in biological order, columns clustered.
+
+```{r category-heatmap, fig.width = 8, fig.height = 4.5}
+for (fs in feature_sets) {
+  d_class <- de %>%
+    filter(mode == focus_mode, feature_set == fs, granularity == "class_id")
+  if (nrow(d_class) == 0) next
+  agg <- d_class %>%
+    group_by(category, feature_id) %>%
+    summarise(median_lfc = median(logFC, na.rm = TRUE), .groups = "drop")
+  m <- long_to_matrix(agg, "category", "feature_id", "median_lfc", fill = 0)
+  m <- m[intersect(CATEGORY_LEVELS, rownames(m)), , drop = FALSE]
+  stopifnot(nrow(m) >= 1)
+  m_clip <- pmax(pmin(m, FC_CLIP), -FC_CLIP)
+  cat(sprintf("\n### %s / %s\n\n", focus_mode, fs))
+  pheatmap(m_clip, color = DIVERGING, breaks = DIVERGING_BREAKS,
+           cluster_rows = FALSE, clustering_method = "ward.D2",
+           main = paste(focus_mode, fs, "category median logFC"),
+           fontsize_row = 9, fontsize_col = 9, border_color = NA)
+  save_rds(m, paste0("category_class_median_", fs))
+}
+```
+
+## Ordination of perturbations by repeat response
+
+Each perturbation is its family-level logFC vector; distance is 1 minus correlation. Colour separation in the MDS means a category-specific response.
+
+```{r ordination, fig.width = 8, fig.height = 6}
+fam <- de %>% filter(mode == focus_mode, granularity == "family_id")
+stopifnot(nrow(fam) > 0)
+fam$col_id <- paste(fam$feature_set, fam$feature_id, sep = ":")
+prof <- long_to_matrix(fam, "gene", "col_id", "logFC", fill = 0)
+stopifnot(nrow(prof) >= 3, ncol(prof) >= 3)
+save_rds(prof, "family_logfc_profile")
+
+dist_pert <- as.dist(1 - cor(t(prof)))
+mds <- cmdscale(dist_pert, k = 2)
+stopifnot(nrow(mds) == nrow(prof))
+mds_df <- data.frame(gene = rownames(mds), MDS1 = mds[, 1], MDS2 = mds[, 2],
+                     category = factor(cat_lookup[rownames(mds)],
+                                       levels = CATEGORY_LEVELS))
+p_mds <- ggplot(mds_df, aes(MDS1, MDS2, colour = category, label = gene)) +
+  geom_point(size = 2.5) +
+  geom_text_repel(size = 3, max.overlaps = 20, show.legend = FALSE) +
+  scale_colour_manual(values = CATEGORY_COLORS, drop = FALSE) +
+  labs(title = paste(focus_mode, "perturbation MDS on family logFC")) +
+  theme_minimal(base_size = 11)
+print(p_mds)
+save_rds(mds_df, "mds_coords")
+
+hc <- hclust(dist_pert, method = "ward.D2")
+hc$labels <- paste0(substr(cat_lookup[rownames(prof)], 1, 4), ":",
+                    rownames(prof))
+plot(hc, main = "Perturbation clustering (label prefix = category)",
+     xlab = "", sub = "", cex = 0.7)
+```
+
+## Is the category associated with the repeat response?
+
+PERMANOVA (adonis2) measures how much of the between-perturbation distance the category explains. The within-versus-between test compares same-category profile correlation against different-category pairs, with a label-shuffling p-value. The per-class Kruskal-Wallis asks, per class, whether logFC differs across categories.
+
+```{r association-tests}
+meta <- data.frame(gene = rownames(prof),
+                   category = factor(cat_lookup[rownames(prof)],
+                                     levels = CATEGORY_LEVELS))
+stopifnot(identical(meta$gene, rownames(prof)), !anyNA(meta$category))
+
+permanova <- adonis2(dist_pert ~ category, data = meta, permutations = 1999)
+print(permanova)
+save_rds(permanova, "permanova_category")
+
+cc <- cor(t(prof))
+same <- outer(meta$category, meta$category, "==")
+ut <- upper.tri(cc)
+stopifnot(any(ut & same), any(ut & !same))
+within_obs <- mean(cc[ut & same])
+between_obs <- mean(cc[ut & !same])
+stat_obs <- within_obs - between_obs
+
+set.seed(1)
+n_perm <- 2000
+perm_stat <- replicate(n_perm, {
+  lab <- sample(meta$category)
+  s <- outer(lab, lab, "==")
+  mean(cc[ut & s]) - mean(cc[ut & !s])
+})
+perm_p <- (1 + sum(perm_stat >= stat_obs)) / (1 + n_perm)
+within_between <- data.frame(within_mean_cor = within_obs,
+                             between_mean_cor = between_obs,
+                             difference = stat_obs,
+                             perm_p = perm_p)
+knitr::kable(within_between, digits = 4,
+             caption = "Within- vs between-category profile correlation")
+save_rds(within_between, "within_between_correlation")
+
+kw <- de %>%
+  filter(mode == focus_mode, granularity == "class_id") %>%
+  group_by(feature_set, feature_id) %>%
+  summarise(n_categories = n_distinct(category),
+            n_points = dplyr::n(),
+            p = if (n_distinct(category) >= 2 && dplyr::n() >= 3) {
+                  kruskal.test(logFC ~ as.factor(category))$p.value
+                } else NA_real_,
+            .groups = "drop")
+kw$FDR <- p.adjust(kw$p, method = "BH")
+kw <- kw %>% arrange(FDR)
+knitr::kable(head(kw, 25), digits = 4,
+             caption = "Per-class Kruskal-Wallis of logFC across categories")
+save_rds(kw, "kruskal_per_class")
+```
+
+## Overall repeat response per perturbation, ordered by category
+
+Median family logFC per perturbation, coloured by category, sized by significantly up families. Exosome and 3 prime end processing should rank highest.
+
+```{r lollipop, fig.width = 8, fig.height = 7}
+overall <- de %>%
+  filter(mode == focus_mode, granularity == "family_id") %>%
+  group_by(gene, category) %>%
+  summarise(median_lfc = median(logFC, na.rm = TRUE),
+            n_sig_up = sum(FDR < 0.05 & logFC > 0, na.rm = TRUE),
+            .groups = "drop")
+stopifnot(nrow(overall) > 0)
+overall$gene <- factor(overall$gene, levels = overall$gene[order(overall$median_lfc)])
+p_loll <- ggplot(overall, aes(median_lfc, gene, colour = category)) +
+  geom_segment(aes(x = 0, xend = median_lfc, yend = gene)) +
+  geom_point(aes(size = n_sig_up)) +
+  scale_colour_manual(values = CATEGORY_COLORS, drop = FALSE) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey60") +
+  labs(x = "median family logFC", y = NULL, size = "sig. up families",
+       title = paste(focus_mode, "overall repeat response per perturbation")) +
+  theme_minimal(base_size = 10)
+print(p_loll)
+save_rds(overall, "overall_response")
+```
+
+## Response split by polyA competence
+
+logFC by category, split into polyA-competent classes (captured by 10x) and the rest.
+
+```{r polya-split, fig.width = 9, fig.height = 5}
+fam2 <- de %>%
+  filter(mode == focus_mode, granularity == "family_id") %>%
+  mutate(polya = factor(ifelse(is.na(as.character(polya)), "unknown",
+                               as.character(polya)),
+                        levels = names(POLYA_COLORS)))
+stopifnot(nrow(fam2) > 0)
+p_polya <- ggplot(fam2, aes(category, logFC, fill = polya)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60") +
+  geom_boxplot(outlier.size = 0.4, position = position_dodge(preserve = "single")) +
+  scale_fill_manual(values = POLYA_COLORS, drop = FALSE) +
+  coord_flip() +
+  labs(x = NULL, y = "family logFC",
+       title = paste(focus_mode, "response by category and polyA competence")) +
+  theme_minimal(base_size = 10)
+print(p_polya)
+```
+
+## Class composition of the up-regulated repeats
+
+Per perturbation, the count of significantly up families (FDR below 0.05, logFC above 0) split by repeat class.
+
+```{r composition, fig.width = 9, fig.height = 7}
+comp <- de %>%
+  filter(mode == focus_mode, granularity == "family_id",
+         FDR < 0.05, logFC > 0) %>%
+  group_by(gene, category, class_id) %>%
+  summarise(n = dplyr::n(), .groups = "drop")
+if (nrow(comp) == 0) {
+  cat("no significantly up families at FDR < 0.05; composition skipped\n")
+} else {
+  tot <- comp %>% group_by(gene) %>% summarise(total = sum(n), .groups = "drop")
+  ord <- tot %>% arrange(total) %>% pull(gene)
+  comp$gene <- factor(comp$gene, levels = ord)
+  p_comp <- ggplot(comp, aes(n, gene, fill = class_id)) +
+    geom_col() +
+    scale_fill_viridis_d(option = "turbo") +
+    labs(x = "significantly up families", y = NULL, fill = "class",
+         title = paste(focus_mode, "class composition of up repeats")) +
+    theme_minimal(base_size = 10)
+  print(p_comp)
+  save_rds(comp, "up_class_composition")
+}
+```
+
+## Mode robustness: unique versus multi
+
+If both modes ran, family logFC should agree. A tight diagonal means conclusions do not depend on multimapper handling.
+
+```{r mode-robustness, fig.width = 6, fig.height = 6}
+if (all(c("unique", "multi") %in% modes) &&
+    all(c("unique", "multi") %in% de$mode)) {
+  fu <- de %>%
+    filter(granularity == "family_id") %>%
+    select(gene, feature_set, feature_id, mode, logFC) %>%
+    pivot_wider(names_from = mode, values_from = logFC)
+  fu <- fu %>% filter(!is.na(unique), !is.na(multi))
+  stopifnot(nrow(fu) > 0)
+  r_modes <- cor(fu$unique, fu$multi)
+  p_modes <- ggplot(fu, aes(unique, multi)) +
+    geom_point(alpha = 0.25, size = 0.7) +
+    geom_abline(slope = 1, intercept = 0, colour = "firebrick") +
+    labs(title = sprintf("family logFC, unique vs multi (Pearson %.3f)", r_modes),
+         x = "unique logFC", y = "multi logFC") +
+    theme_minimal(base_size = 11)
+  print(p_modes)
+} else {
+  cat("both modes not present; mode-robustness panel skipped\n")
+}
+```
+
+## Subfamily resolution for exemplar perturbations
+
+Top families by absolute logFC, one perturbation per category. Shows subfamily detail the class-level metric hides, like young versus old Alu.
+
+```{r subfamily-zoom, fig.width = 10, fig.height = 7}
+preferred <- c("EXOSC4", "CPSF3", "INTS8", "MED30", "PAF1", "SNRPD1")
+exemplars <- preferred[preferred %in% de$gene]
+stopifnot(length(exemplars) >= 1)
+ex <- de %>%
+  filter(mode == focus_mode, granularity == "family_id", gene %in% exemplars)
+top <- ex %>%
+  group_by(gene) %>%
+  slice_max(abs(logFC), n = 15, with_ties = FALSE) %>%
+  ungroup() %>%
+  arrange(gene, logFC)
+top$key <- factor(paste(top$gene, top$feature_set, top$feature_id, sep = "__"),
+                  levels = paste(top$gene, top$feature_set, top$feature_id, sep = "__"))
+p_sub <- ggplot(top, aes(logFC, key, fill = class_id)) +
+  geom_col() +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey60") +
+  scale_fill_viridis_d(option = "turbo") +
+  scale_y_discrete(labels = function(x) sub("^.*__", "", x)) +
+  facet_wrap(~ gene, scales = "free", ncol = 3) +
+  labs(x = "family logFC", y = NULL, fill = "class",
+       title = paste(focus_mode, "top families for exemplar perturbations")) +
+  theme_minimal(base_size = 9)
+print(p_sub)
+save_rds(top, "subfamily_zoom")
+```
+
+## Session
+
+```{r session}
+sessionInfo()
+```

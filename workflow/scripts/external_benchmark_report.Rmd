@@ -32,6 +32,19 @@ reclaim_eval_dir <- params$reclaim_eval_dir
 
 Side-by-side accuracy of REclaim's quantifiers (STARsolo unique, kallisto, alevin, bowtie2) and external tools (TEtranscripts, scTE, optionally SQuIRE) on the same simulated dataset, scored against the same per-locus ground truth at the same granularities. Every number is comparable: same fastqs, same BAMs, same locus_map, same evaluate.py.
 
+### Native granularity coverage
+
+REclaim is the only quantifier here that natively reports at every granularity (locus, gene_id, family_id, class_id) from a single BAM pass through the GTF feature hierarchy. The external tools each emit at one native level and rely on the same locus_map rollup that REclaim provides; rows scored at a non-native granularity are aggregated counts, not independent measurements.
+
+| Quantifier | Native level | locus | gene_id | family_id | class_id |
+|---|---|---|---|---|---|
+| REclaim (STARsolo, kallisto, alevin, bowtie2) | locus / gene_id | native | native | native | native |
+| TEtranscripts | gene_id (subfamily) | not produced | native | rolled up | rolled up |
+| scTE | family_id | not produced | not possible | native | rolled up |
+| SQuIRE | locus | native | rolled up | rolled up | rolled up |
+
+In the panels below, REclaim bars at family_id and class_id reflect independent counts on those feature_sets, not a post-hoc rollup of gene_id counts.
+
 ```{r load-data}
 ext_summary_path <- file.path(ext_dir, "summary_global_metrics.tsv")
 reclaim_summary_path <- file.path(reclaim_eval_dir, "summary_global_metrics.tsv")
@@ -80,7 +93,23 @@ ggplot(p_df, aes(x = aligner, y = pearson_r, fill = source)) +
   theme(axis.text.x = element_text(angle = 30, hjust = 1))
 ```
 
-How to read this. Bars at or near 1 are near-perfect quantifiers. The colour split (REclaim vs external) is the headline: a REclaim aligner that matches or beats the external tool at the same granularity is the result we want to see in the manuscript Fig 2 panel. A clear ranking in any panel is publication-ready; a tie or REclaim-loses outcome is a result too and gets noted in the discussion.
+How to read this. Bars at or near 1 are near-perfect quantifiers. The colour split (REclaim vs external) is the headline. At granularities marked "rolled up" in the table above, the external bar reflects a post-hoc aggregation through the same locus_map REclaim already used, so a REclaim win there is a win on the native quantification side, not on rollup logic.
+
+### Headline: best quantifier per granularity
+
+```{r headline}
+headline <- combined %>%
+  filter(!is.na(pearson_r)) %>%
+  group_by(granularity) %>%
+  arrange(desc(pearson_r)) %>%
+  slice_head(n = 3) %>%
+  mutate(rank = row_number()) %>%
+  ungroup() %>%
+  select(granularity, rank, aligner, source, pearson_r, recall, specificity)
+
+knitr::kable(headline, digits = 3,
+             caption = "Top 3 quantifiers by Pearson r at each granularity.")
+```
 
 ## Sensitivity (recall)
 
@@ -108,6 +137,24 @@ ggplot(combined %>% filter(!is.na(specificity)),
   labs(x = NULL, y = "specificity (TN / (TN+FP))",
        fill = NULL,
        title = "Per-quantifier specificity, by granularity") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+```
+
+## Precision and F1
+
+```{r precision-f1, fig.width=10, fig.height=8}
+pf_long <- combined %>%
+  select(aligner, source, granularity, precision, f1) %>%
+  pivot_longer(c(precision, f1), names_to = "metric", values_to = "value") %>%
+  filter(!is.na(value))
+
+ggplot(pf_long, aes(x = aligner, y = value, fill = source)) +
+  geom_col(position = position_dodge2(preserve = "single")) +
+  facet_grid(metric ~ granularity, scales = "free_y") +
+  scale_y_continuous(limits = c(0, 1.05)) +
+  labs(x = NULL, y = NULL, fill = NULL,
+       title = "Per-quantifier precision and F1, by granularity") +
   theme_minimal() +
   theme(axis.text.x = element_text(angle = 30, hjust = 1))
 ```
@@ -169,6 +216,21 @@ if (nrow(cost_df) > 0) {
     theme(axis.text.x = element_text(angle = 30, hjust = 1))
 } else {
   cat("No wall_time_s rows; runtime panel skipped.\n")
+}
+```
+
+```{r rss, fig.width=10, fig.height=4}
+if (nrow(cost_df) > 0 && any(!is.na(cost_df$max_rss_mb))) {
+  ggplot(cost_df,
+         aes(x = aligner, y = max_rss_mb, fill = source)) +
+    geom_col(position = position_dodge2(preserve = "single")) +
+    labs(x = NULL, y = "peak RSS (MB)",
+         fill = NULL,
+         title = "Per-tool peak memory on the simulated dataset") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 30, hjust = 1))
+} else {
+  cat("No max_rss_mb rows; memory panel skipped.\n")
 }
 ```
 

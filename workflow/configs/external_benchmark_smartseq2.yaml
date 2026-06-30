@@ -59,20 +59,10 @@ resources:
 external_benchmark: true
 external_tools:
   - tetranscripts
-  ## - squire   ## uncomment if SQuIRE installs cleanly on the target
-external_samples:
-  - cell_001
-  - cell_002
-  - cell_003
-  - cell_004
-  - cell_005
-  - cell_006
-  - cell_007
-  - cell_008
-  - cell_009
-  - cell_010
+  - squire
 external_granularities:
   - gene_id
   - family_id
   - class_id
+## external_samples omitted; the snmk default expands to all simulation.n_cells (cell_001..cell_NNN).
 external_min_overlap_fraction: 0.05

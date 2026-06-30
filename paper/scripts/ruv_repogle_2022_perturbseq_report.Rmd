@@ -48,6 +48,7 @@ cells_to_perturbation_path <- params$cells_to_perturbation
 selected_perturbations_path <- params$selected_perturbations
 alignment_qc_path <- params$alignment_qc
 starsolo_base <- params$starsolo_base
+starsolo_tagcount_base <- params$starsolo_tagcount_base
 report_outdir <- params$report_outdir
 indices_base <- params$indices_base
 n_controls <- as.integer(params$n_controls)
@@ -160,34 +161,69 @@ if (!is.null(align_qc)) {
 Each (perturbation, gem_group) pair becomes its own pseudobulk column. This gives ~30-48 columns per perturbation across all gem_groups, plus ~48 control columns drawn from the same 48 gemgroups. Per-contrast designs include gemgroup as a blocking factor and W from RUVg.
 
 ```{r pseudobulk-helpers}
-load_starsolo_matrix <- function(library, mode, feature_set) {
-  mtx_dir <- file.path(starsolo_base, library,
-                       paste0(mode, "_", feature_set), "Solo.out", "Gene", "raw")
+# In tagcount mode genes sit under starsolo_base and repeats under the
+# tagcount base; in per_featureset mode both share starsolo_base.
+base_for_featureset <- function(feature_set) {
+  if (feature_set == "genes" || !nzchar(starsolo_tagcount_base)) starsolo_base
+  else starsolo_tagcount_base
+}
+
+# Stream the mtx in triplet chunks, keeping only wanted barcodes, so the
+# full whitelist matrix (millions of gene columns) never enters memory.
+read_starsolo_cells <- function(mtx_dir, mode, keep_barcodes,
+                                chunk_triplets = 5e6) {
   if (!dir.exists(mtx_dir)) return(NULL)
   em_path <- file.path(mtx_dir, "UniqueAndMult-EM.mtx")
   mtx_path <- if (mode == "multi" && file.exists(em_path)) em_path else
     file.path(mtx_dir, "matrix.mtx")
-  m <- readMM(mtx_path)
+  if (!file.exists(mtx_path)) return(NULL)
+
   features <- read.table(file.path(mtx_dir, "features.tsv"), sep = "\t",
                          header = FALSE, stringsAsFactors = FALSE,
                          quote = "", comment.char = "")$V1
   barcodes <- readLines(file.path(mtx_dir, "barcodes.tsv"))
-  rownames(m) <- features
-  colnames(m) <- barcodes
-  m
+  present <- keep_barcodes[keep_barcodes %in% barcodes]
+  if (length(present) == 0) return(NULL)
+  col_remap <- integer(length(barcodes))
+  col_remap[match(present, barcodes)] <- seq_along(present)
+  rm(barcodes)
+
+  con <- file(mtx_path, "r")
+  on.exit(close(con))
+  repeat {
+    header <- readLines(con, n = 1)
+    if (length(header) == 0) return(NULL)
+    if (!startsWith(header, "%")) break  # dims line reached, body follows
+  }
+
+  ii <- integer(0); jj <- integer(0); xx <- numeric(0)
+  repeat {
+    vals <- scan(con, what = double(), n = chunk_triplets * 3, quiet = TRUE)
+    if (length(vals) == 0) break
+    trip <- matrix(vals, ncol = 3, byrow = TRUE)
+    new_col <- col_remap[trip[, 2]]
+    sel <- new_col > 0
+    if (any(sel)) {
+      ii <- c(ii, trip[sel, 1])
+      jj <- c(jj, new_col[sel])
+      xx <- c(xx, trip[sel, 3])
+    }
+  }
+
+  Matrix::sparseMatrix(i = ii, j = jj, x = xx,
+                       dims = c(length(features), length(present)),
+                       dimnames = list(features, present))
 }
 
 pseudobulk_one_library <- function(library, gem_group, mode, feature_set,
                                     cell_assign) {
-  m <- load_starsolo_matrix(library, mode, feature_set)
-  if (is.null(m)) return(NULL)
   lib_cells <- cell_assign[cell_assign$gem_group == gem_group, ]
   bc_strip <- sub("-[0-9]+$", "", lib_cells$cell_barcode)
-  matched_idx <- match(bc_strip, colnames(m))
-  ok <- !is.na(matched_idx)
-  if (sum(ok) == 0) return(NULL)
-  lib_cells <- lib_cells[ok, ]
-  m <- m[, matched_idx[ok], drop = FALSE]
+  mtx_dir <- file.path(base_for_featureset(feature_set), library,
+                       paste0(mode, "_", feature_set), "Solo.out", "Gene", "raw")
+  m <- read_starsolo_cells(mtx_dir, mode, bc_strip)
+  if (is.null(m)) return(NULL)
+  lib_cells <- lib_cells[match(colnames(m), bc_strip), ]
   groups <- factor(lib_cells$pseudobulk_id)
   group_indicator <- Matrix::sparseMatrix(
     i = seq_along(groups),
@@ -231,6 +267,11 @@ build_pseudobulk <- function(mode, feature_set) {
   cells_per_col <- table(cells$pseudobulk_id)
   keep_cols <- intersect(colnames(out),
                           names(cells_per_col)[cells_per_col >= min_cells_per_col])
+  if (length(keep_cols) == 0) {
+    stop("no column passed min_cells_per_col=", min_cells_per_col, " for ",
+         mode, " ", feature_set, "; max cells per column is ",
+         max(cells_per_col), ". Lower min_cells_per_perturbation_col.")
+  }
   out <- out[, keep_cols, drop = FALSE]
 
   meta <- data.frame(
@@ -287,8 +328,12 @@ for (mode in starsolo_modes) {
                                       decreasing = TRUE)][seq_len(min(n_controls,
                                                                        nrow(ranked)))]
 
-  ruv_state <- fit_ruv_range(gene_dge, controls, k_max = max(4L, k_selected))
-  W <- pick_W_matrix(ruv_state, k = k_selected)
+  ruv_state <- fit_ruv_range(
+    genes_expr = gene_dge$counts, controls = controls,
+    pheno_df = data.frame(perturbed = meta$perturbed,
+                          row.names = meta$pseudobulk_id),
+    ks = seq_len(max(4L, k_selected)))
+  W <- pick_W_matrix(ruv_state$fits, k_selected, meta$pseudobulk_id)
   ruv_fits[[mode]] <- list(meta = meta, W = W, controls = controls,
                             gene_dge = gene_dge, ruv_state = ruv_state)
 }
@@ -377,6 +422,7 @@ for (mode in names(ruv_fits)) {
 save_rds(de_results, "de_results")
 
 de_long <- bind_rows(de_results)
+de_long$pert_id <- de_long$gene_transcript  # plot helpers key on pert_id
 
 bio_gene <- if (!is.null(biology_annotation)) {
   biology_annotation %>%
@@ -434,7 +480,7 @@ for (mode_i in starsolo_modes) {
       filter(mode == mode_i, feature_set == fs_i, granularity == "family_id")
     if (nrow(df_family) == 0) next
     cat(sprintf("\n### family_id distribution by polyA-competence: %s / %s\n\n",
-                mode, fs))
+                mode_i, fs_i))
     print(class_logfc_box(df_family, facet_col = "polya",
                           title_tag = paste(mode_i, fs_i, "family_id logFC")))
   }
@@ -537,7 +583,7 @@ if (nzchar(tagcount_starsolo_base) && dir.exists(tagcount_starsolo_base)) {
     parts <- list()
     for (gg in sort(unique(cells$gem_group))) {
       library_id <- paste0("KD6_", gg, "_essential")
-      m <- load_starsolo_matrix_at(tagcount_starsolo_base, library_id,
+      m <- load_starsolo_matrix_at(if (feature_set == "genes") starsolo_base else tagcount_starsolo_base, library_id,
                                     mode, feature_set)
       if (is.null(m)) next
       lib_cells <- cells[cells$gem_group == gg, ]

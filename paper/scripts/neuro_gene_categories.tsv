@@ -1,0 +1,24 @@
+gene	mechanism	disease_group	disease_short	is_positive_control
+ERCC2	DNA repair	DNA-repair syndromes (XP / AGS)	xeroderma pigmentosum	FALSE
+ERCC3	DNA repair	DNA-repair syndromes (XP / AGS)	xeroderma pigmentosum	FALSE
+DDB1	DNA repair	DNA-repair syndromes (XP / AGS)	nucleotide-excision repair	FALSE
+RNASEH2C	DNA repair	DNA-repair syndromes (XP / AGS)	Aicardi-Goutieres	FALSE
+FEN1	DNA repair	DNA-repair syndromes (XP / AGS)	base-excision repair	FALSE
+SMUG1	DNA repair	DNA-repair syndromes (XP / AGS)	base-excision repair	FALSE
+PNKP	DNA repair	Cerebellar & spinocerebellar ataxia	AOA ataxia	FALSE
+XRCC1	DNA repair	Cerebellar & spinocerebellar ataxia	axonal ataxia	FALSE
+FXN	Mitochondrial & other	Cerebellar & spinocerebellar ataxia	Friedreich ataxia	FALSE
+TBP	Mitochondrial & other	Cerebellar & spinocerebellar ataxia	SCA17	FALSE
+POLG2	Mitochondrial & other	Cerebellar & spinocerebellar ataxia	POLG spectrum	FALSE
+EXOSC3	RNA metabolism	Pontocerebellar hypoplasia	pontocerebellar hypoplasia	TRUE
+EXOSC8	RNA metabolism	Pontocerebellar hypoplasia	pontocerebellar hypoplasia	TRUE
+EXOSC9	RNA metabolism	Pontocerebellar hypoplasia	pontocerebellar hypoplasia	TRUE
+TARDBP	RNA metabolism	ALS / FTD	ALS / FTD	FALSE
+EWSR1	RNA metabolism	ALS / FTD	ALS / FTD	FALSE
+SOD1	Mitochondrial & other	ALS / FTD	ALS	FALSE
+DDX3X	RNA metabolism	Neurodevelopmental & neuromuscular	DDX3X disorder	FALSE
+PABPN1	RNA metabolism	Neurodevelopmental & neuromuscular	OPMD	FALSE
+DICER1	RNA metabolism	Neurodevelopmental & neuromuscular	miRNA processing	FALSE
+SMN2	Mitochondrial & other	Neurodevelopmental & neuromuscular	spinal muscular atrophy	FALSE
+SETD2	Mitochondrial & other	Neurodevelopmental & neuromuscular	Luscan-Lumish	FALSE
+SUPV3L1	Mitochondrial & other	Neurodevelopmental & neuromuscular	mtDNA degradosome	FALSE

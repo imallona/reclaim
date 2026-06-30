@@ -70,8 +70,3 @@ def test_de_simulations_script_exists():
 def test_de_simulations_module_exists():
     module = REPO_ROOT / "workflow" / "modules" / "de_simulations.snmk"
     assert module.exists(), f"Missing snakemake module at {module}"
-
-
-def test_de_simulations_doc_exists():
-    doc = REPO_ROOT / "docs" / "de_simulations.md"
-    assert doc.exists(), f"Missing plain-English doc at {doc}"

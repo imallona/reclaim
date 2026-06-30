@@ -144,21 +144,25 @@ An HTML report (`evaluation_report.html`) is rendered by `evaluation_report.Rmd`
 
 ### External tool benchmark
 
-When `external_benchmark: true` is set in a simulation config, an additional module (`workflow/modules/external_tools_benchmark.snmk`) runs published repeat-quantification tools on the same simulation BAMs and ground truth as REclaim and scores them through the same `evaluate.py`. Tool coverage:
+When `external_benchmark: true` is set in a simulation config, the module `workflow/modules/external_tools_benchmark.snmk` runs published repeat-quantification tools on the same simulation BAMs and ground truth as REclaim, scored through the same `evaluate.py`. Tool coverage:
 
 | Tool | Modality | Native granularity | Conda env |
 |---|---|---|---|
 | TEtranscripts (TEcount) | bulk | gene_id (subfamily) | `workflow/envs/tetranscripts.yaml` (TEtranscripts 2.2.3) |
 | scTE | single cell | family_id | `workflow/envs/scte.yaml` (scTE 1.0.0) |
-| SQuIRE | bulk (optional) | locus | `workflow/envs/squire.yaml` (SQuIRE 0.9.9.92) |
+| SQuIRE | bulk | locus | `workflow/envs/squire.yaml` (SQuIRE 0.9.9.92, Python 3.6, STAR 2.5.3a; isolated env) |
 
-Per tool, three rules produce the final accuracy table:
+REclaim is the only quantifier here that natively emits at every granularity (locus, gene_id, family_id, class_id) from a single BAM pass through the GTF feature hierarchy. External tools emit at one native level. Rows scored at non-native granularities are rolled up via the same locus_map REclaim uses, so a comparison at those levels measures the native counting step rather than the rollup logic.
 
-1. `run_<tool>` invokes the upstream tool. TEcount runs once per simulated SmartSeq2 cell; scTE runs once on the multi-cell Chromium BAM. Outputs land under `{base}/external_benchmark/{tool}/raw/`.
-2. `harmonize_external` calls `workflow/scripts/harmonize_external_counts.py` to convert the tool's native output to the REclaim feature x cell TSV format. The harmoniser asserts that at least `external_min_overlap_fraction` of the tool's feature IDs map to a known REclaim feature in the locus_map.
-3. `score_external_benchmark` runs the same `evaluate.py` used for REclaim's own quantifiers, with the same locus_map and granularity contracts.
+Per tool, the rule chain is:
+
+1. Run rules invoke each upstream tool against the existing STARsolo BAMs. TEcount runs once per simulated SmartSeq2 cell. scTE runs once on the multi-cell Chromium BAM. SQuIRE runs as a chain (`Fetch` -> `Clean` -> per-sample `Count` -> combine); the existing STARsolo BAMs are symlinked into a SQuIRE-shaped `map_folder` instead of running a second alignment. Outputs land under `{base}/external_benchmark/{tool}/`.
+2. `harmonize_external` calls `workflow/scripts/harmonize_external_counts.py` to convert the tool's native output to the REclaim feature x cell TSV format. The harmoniser asserts that at least `external_min_overlap_fraction` of the tool's feature IDs map to a known REclaim feature in the locus_map. For scTE on Chromium, the harmoniser also takes a `barcode_to_cell_id.tsv` map produced by the simulator so the h5ad `obs_names` (cell barcodes) are translated into REclaim cell_ids before sample filtering.
+3. `score_external_benchmark` runs the same `evaluate.py` used for REclaim's own quantifiers, with the same locus_map and granularity contracts. Wall time and peak RSS are aggregated across per-sample runs for TEcount and SQuIRE so the cost panel in the report carries one value per tool rather than one per sample.
 
 The render rule reads `summary_global_metrics.tsv` from both `external_benchmark/` and `evaluation/` and produces side-by-side accuracy bars per quantifier, granularity, and class. REdiscoverTE is not included; rationale in `docs/external_tool_benchmark.md`.
+
+Sample scope. The benchmark scores every simulation cell (`simulation.n_cells`) by default. The snmk module derives the cell list from the simulation config when `external_samples` is omitted, so the external benchmark and the REclaim evaluation cover the same cells and the per-quantifier accuracy bars use the same sample set.
 
 A separate noise sweep report (`noise_sweep_report.Rmd`) loads `summary_global_metrics.tsv` from each noise-level run and plots metric degradation as a function of mutation rate. It writes paper-ready CSV tables to `{csv_outdir}/paper_csv/` (by default the directory of the HTML output): `noise_metrics_long.csv`, `noise_metrics_wide.csv` (columns per mutation rate), `noise_degradation_slopes.csv` (linear fit `value ~ mutation_rate` with slope, intercept, R^2, n_points per aligner x feature_set x granularity x metric), `noise_robustness_ranking.csv` (ranks aligners by shallowest slope for accuracy metrics), `per_cell_noise_summary.csv`, and `per_class_noise_metrics.csv`.
 

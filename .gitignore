@@ -5,3 +5,6 @@ __pycache__/
 .snakemake/
 results/
 internal_use/
+docs/*
+!docs/methods.md
+!docs/reclaim-logo.svg

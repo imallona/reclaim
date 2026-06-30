@@ -44,11 +44,19 @@ _ext_outdir = op.join(config['base'], 'external_benchmark')
 _eval_dir = op.join(config['base'], 'evaluation')
 _ext_tools = config.get('external_tools', [])
 _ext_samples = config.get('external_samples', [])
+if not _ext_samples:
+    _ext_samples = [f'cell_{i + 1:03d}'
+                    for i in range(config.get('simulation', {}).get('n_cells', 0))]
 _ext_granularities = config.get('external_granularities', ['gene_id', 'family_id', 'class_id'])
 _ext_min_overlap = config.get('external_min_overlap_fraction', 0.05)
 
 _sim_technology = config.get('simulation', {}).get('technology', 'smartseq2')
 _sim_mutation_rate = config.get('simulation', {}).get('mutation_rate', 0.0)
+
+if 'squire' in _ext_tools and _sim_technology == 'chromium':
+    raise ValueError(
+        "SQuIRE is bulk-only and has no per-cell Chromium notion of a sample; "
+        "remove 'squire' from external_tools for the Chromium config.")
 
 _eval_script = op.join(workflow.basedir, 'scripts', 'evaluate.py')
 _harmonize_script = op.join(workflow.basedir, 'scripts',
@@ -56,33 +64,77 @@ _harmonize_script = op.join(workflow.basedir, 'scripts',
 
 _locus_map = op.join(config['indices_base'], 'indices', genome_tag,
                      'repeats_locus_map.tsv')
-_repeats_gtf = op.join(config['indices_base'], 'indices', genome_tag,
-                       'repeats.gtf')
-_genes_gtf = op.join(config['indices_base'], 'indices', genome_tag,
-                     'genes.gtf')
+_repeats_gtf = op.join(config['indices_base'], 'tmp', 'repeats.gtf')
+_genes_gtf = op.join(config['indices_base'], 'tmp', 'genes.gtf')
 
 _ground_truth = op.join(config['base'], 'simulations', _sim_technology,
                         'ground_truth.tsv')
 
 
+_per_cell_bam_dir = op.join(_ext_outdir, 'per_cell_bams')
+_multi_cell_bam = op.join(config['base'], 'starsolo', _sim_technology,
+                          'unique_repeats', 'Aligned.sortedByCoord.out.bam')
+
+
 def _per_sample_bam(wildcards):
-    """SmartSeq2 has one BAM per cell; Chromium has a single multi-cell BAM
-    with CB tags. The wildcard {sample} disambiguates which we want."""
+    """SmartSeq2: per-cell BAM from split_smartseq2_per_cell_bams.
+    Chromium: the multi-cell BAM (scTE keys on CB tags directly)."""
     if _sim_technology == 'smartseq2':
-        return op.join(config['base'], 'starsolo', _sim_technology,
-                       wildcards.sample, 'unique_repeats',
-                       'Aligned.sortedByCoord.out.bam')
-    return op.join(config['base'], 'starsolo', _sim_technology,
-                   'unique_repeats', 'Aligned.sortedByCoord.out.bam')
+        return op.join(_per_cell_bam_dir, f'{wildcards.sample}.bam')
+    return _multi_cell_bam
 
 
 def _all_bams_for_tool():
     if _sim_technology == 'smartseq2':
-        return [op.join(config['base'], 'starsolo', _sim_technology, s,
-                        'unique_repeats', 'Aligned.sortedByCoord.out.bam')
-                for s in _ext_samples]
-    return [op.join(config['base'], 'starsolo', _sim_technology,
-                    'unique_repeats', 'Aligned.sortedByCoord.out.bam')]
+        return [op.join(_per_cell_bam_dir, f'{s}.bam') for s in _ext_samples]
+    return [_multi_cell_bam]
+
+
+rule split_smartseq2_per_cell_bams:
+    """Split the multi-cell SmartSeq2 BAM by @RG into per-cell BAMs so
+    bulk-style tools (TEcount, SQuIRE) can run one sample at a time."""
+    conda: op.join(workflow.basedir, 'envs', 'squire.yaml')
+    input:
+        bam = _multi_cell_bam,
+    output:
+        bams = temp(expand(op.join(_per_cell_bam_dir, '{sample}.bam'),
+                           sample=_ext_samples)),
+        bais = temp(expand(op.join(_per_cell_bam_dir, '{sample}.bam.bai'),
+                           sample=_ext_samples)),
+        unfixed = temp(expand(op.join(_per_cell_bam_dir, '{sample}.unfixed.bam'),
+                              sample=_ext_samples)),
+        headers = temp(expand(op.join(_per_cell_bam_dir, '{sample}.header.sam'),
+                              sample=_ext_samples)),
+    params:
+        outdir = _per_cell_bam_dir,
+        samples = ' '.join(_ext_samples),
+    log:
+        op.join(config['base'], 'logs', 'split_smartseq2_per_cell_bams.log'),
+    benchmark:
+        op.join(config['base'], 'benchmarks',
+                'split_smartseq2_per_cell_bams.txt'),
+    threads: 4
+    shell:
+        r"""
+        mkdir -p {params.outdir}
+        for s in {params.samples}; do
+            samtools view -b -r $s {input.bam} > {params.outdir}/$s.unfixed.bam
+            # squire Count's is_paired() needs --readFilesIn in the @CO line,
+            # which STARsolo SmartSeq omits; rewrite it (two tokens = paired).
+            if [ $(samtools view -c -f 1 {params.outdir}/$s.unfixed.bam) -gt 0 ]; then
+                readfiles="r1.fastq r2.fastq"
+            else
+                readfiles="r1.fastq"
+            fi
+            samtools view -H {params.outdir}/$s.unfixed.bam | grep -v '^@CO' \
+                > {params.outdir}/$s.header.sam
+            printf '@CO\tuser command line: STAR --readFilesIn %s --outFileNamePrefix out/\n' \
+                "$readfiles" >> {params.outdir}/$s.header.sam
+            samtools reheader {params.outdir}/$s.header.sam \
+                {params.outdir}/$s.unfixed.bam > {params.outdir}/$s.bam
+            samtools index {params.outdir}/$s.bam
+        done 2> {log}
+        """
 
 
 # ----------------------------------------------------------------------
@@ -165,20 +217,67 @@ rule merge_tetranscripts:
         """
 
 
+rule aggregate_tetranscripts_benchmark:
+    """Sum per-sample TEcount wall times and take max of per-sample RSS.
+    Produces benchmarks/tetranscripts.txt so score_external_benchmark
+    reads total TEcount compute cost in the same column shape as the
+    other tools."""
+    input:
+        per_sample = expand(
+            op.join(config['base'], 'benchmarks',
+                    'tetranscripts_{sample}.txt'),
+            sample=_ext_samples),
+    output:
+        merged = op.join(config['base'], 'benchmarks', 'tetranscripts.txt'),
+    run:
+        import csv
+        total_s = 0.0
+        max_rss = 0.0
+        fieldnames = None
+        for p in input.per_sample:
+            with open(p) as fh:
+                reader = csv.DictReader(fh, delimiter='\t')
+                fieldnames = fieldnames or reader.fieldnames
+                for row in reader:
+                    try:
+                        total_s += float(row.get('s') or 0)
+                    except ValueError:
+                        pass
+                    try:
+                        max_rss = max(max_rss, float(row.get('max_rss') or 0))
+                    except ValueError:
+                        pass
+        with open(output.merged, 'w') as fh:
+            fh.write('\t'.join(fieldnames) + '\n')
+            row = {c: '' for c in fieldnames}
+            row['s'] = f'{total_s:.4f}'
+            row['max_rss'] = f'{max_rss:.2f}'
+            fh.write('\t'.join(row[c] for c in fieldnames) + '\n')
+
+
 # ----------------------------------------------------------------------
 # scTE (single-cell; one Chromium BAM with CB tags)
 # ----------------------------------------------------------------------
 
 rule run_scte_index:
+    """scTE_build in custom-annotation mode does not read a GTF for -te; it
+    expects a 4-column TSV (chr, start, end, name). We convert the repeats
+    GTF and use family_id as the name so scTE counts at family granularity,
+    matching what harmonize_external_counts.py expects for scte.
+
+    scTE_build appends '.<mode>.idx' to the -o value; the default mode is
+    exclusive, so the produced index file is scte_index.exclusive.idx."""
     conda: op.join(workflow.basedir, 'envs', 'scte.yaml')
     input:
         repeats_gtf = _repeats_gtf,
         genes_gtf = _genes_gtf,
     output:
-        idx = op.join(_ext_outdir, 'scte', 'index', 'scte_index.idx'),
+        idx = op.join(_ext_outdir, 'scte', 'index', 'scte_index.exclusive.idx'),
     params:
         outdir = op.join(_ext_outdir, 'scte', 'index'),
         genome = config.get('reference', {}).get('assembly', 'hg38'),
+        te_bed = op.join(_ext_outdir, 'scte', 'index', 'repeats_scte.bed'),
+        idx_prefix = op.join(_ext_outdir, 'scte', 'index', 'scte_index'),
     log:
         op.join(config['base'], 'logs', 'scte_index.log'),
     benchmark:
@@ -186,11 +285,20 @@ rule run_scte_index:
     shell:
         r"""
         mkdir -p {params.outdir}
+        awk -F'\t' '$0 !~ /^#/ {{
+            attr = $9
+            start = index(attr, "family_id \"")
+            if (start > 0) {{
+                rest = substr(attr, start + 11)
+                stop = index(rest, "\"")
+                print $1"\t"$4"\t"$5"\t"substr(rest, 1, stop - 1)
+            }}
+        }}' {input.repeats_gtf} > {params.te_bed}
         scTE_build \
             -g {params.genome} \
-            -te {input.repeats_gtf} \
+            -te {params.te_bed} \
             -gene {input.genes_gtf} \
-            -o {output.idx} \
+            -o {params.idx_prefix} \
             2> {log}
         """
 
@@ -200,12 +308,14 @@ rule run_scte:
     input:
         bam = op.join(config['base'], 'starsolo', _sim_technology,
                       'unique_repeats', 'Aligned.sortedByCoord.out.bam'),
-        idx = op.join(_ext_outdir, 'scte', 'index', 'scte_index.idx'),
+        idx = op.join(_ext_outdir, 'scte', 'index', 'scte_index.exclusive.idx'),
     output:
         h5ad = op.join(_ext_outdir, 'scte', 'raw', 'scte_counts.h5ad'),
     params:
         outdir = op.join(_ext_outdir, 'scte', 'raw'),
         prefix = 'scte_counts',
+        min_genes = config.get('scte', {}).get('min_genes', 1),
+        min_counts = config.get('scte', {}).get('min_counts', 1),
     log:
         op.join(config['base'], 'logs', 'scte.log'),
     benchmark:
@@ -214,65 +324,232 @@ rule run_scte:
     resources:
         mem_mb = config['resources']['max_mem_mb'],
     shell:
+        # scTE assumes -o is a bare basename: it builds its temp tree
+        # ('<o>_scTEtmp/') in the current working directory and re-injects -o
+        # into intermediate paths, so a directory in -o yields a broken nested
+        # path. Run from inside the output dir with absolute input/log paths.
+        # scTE's default cell filter (--min_genes 200) drops every simulated
+        # cell, leaving no h5ad; keep all cells with at least min_genes feature.
+        # --hdf5 True makes scTE write the h5ad (default writes a csv instead).
         r"""
         mkdir -p {params.outdir}
+        bam=$(realpath {input.bam})
+        idx=$(realpath {input.idx})
+        logfile=$(realpath -m {log})
+        cd {params.outdir}
+        rm -rf {params.prefix}_scTEtmp
         scTE \
-            -i {input.bam} \
-            -o {params.outdir}/{params.prefix} \
-            -x {input.idx} \
+            -i "$bam" \
+            -o {params.prefix} \
+            -x "$idx" \
             -CB CB \
             -UMI UB \
+            --min_genes {params.min_genes} \
+            --min_counts {params.min_counts} \
+            --hdf5 True \
             -p {threads} \
-            2> {log}
-        if [ ! -f {params.outdir}/{params.prefix}.h5ad ]; then
+            2> "$logfile"
+        if [ ! -f {params.prefix}.h5ad ]; then
             echo "scTE produced no h5ad output" >&2; exit 2
         fi
         """
 
 
 # ----------------------------------------------------------------------
-# SQuIRE (optional, bulk; flagged best-effort due to old deps)
+# SQuIRE (bulk; isolated conda env on the pinned Python 3.6 + STAR 2.5.3a)
 # ----------------------------------------------------------------------
 
-rule run_squire:
+# SQuIRE expects its own Fetch (UCSC reference + RepeatMasker) and
+# Clean (per-subfamily BED) directories. Both are produced once and
+# reused across samples. Count then runs per BAM. To keep apples-to-
+# apples with the other external tools we reuse the existing STARsolo
+# BAMs rather than running squire Map; per-sample BAMs are symlinked
+# into a SQuIRE-shaped map_folder.
+
+_squire_root = op.join(_ext_outdir, 'squire')
+_squire_fetch_dir = op.join(_squire_root, 'fetch')
+_squire_clean_dir = op.join(_squire_root, 'clean')
+_squire_count_dir = op.join(_squire_root, 'count')
+_squire_raw_dir = op.join(_squire_root, 'raw')
+
+
+rule run_squire_fetch:
+    """Download UCSC genome and RepeatMasker for the configured build.
+    Genome-wide download is required by SQuIRE; the simulation may
+    target a single chromosome but Count just intersects against the
+    bundled annotation and emits zero counts elsewhere."""
     conda: op.join(workflow.basedir, 'envs', 'squire.yaml')
-    input:
-        bams = _all_bams_for_tool(),
-        repeats_gtf = _repeats_gtf,
     output:
-        counts = op.join(_ext_outdir, 'squire', 'raw', 'squire_counts.tsv'),
+        marker = op.join(_squire_fetch_dir, '.done'),
     params:
-        outdir = op.join(_ext_outdir, 'squire', 'raw'),
-        squire_combine_script = op.join(workflow.basedir, 'scripts',
-                                        'squire_combine_counts.py'),
+        outdir = _squire_fetch_dir,
+        build = config.get('reference', {}).get('assembly', 'hg38'),
     log:
-        op.join(config['base'], 'logs', 'squire.log'),
+        op.join(config['base'], 'logs', 'squire_fetch.log'),
     benchmark:
-        op.join(config['base'], 'benchmarks', 'squire.txt'),
+        op.join(config['base'], 'benchmarks', 'squire_fetch.txt'),
     threads: 4
     resources:
         mem_mb = config['resources']['max_mem_mb'],
     shell:
         r"""
         mkdir -p {params.outdir}
-        ## SQuIRE Count expects a directory of BAMs and writes
-        ## squire_count_<sample>.txt per sample. We aggregate them in a
-        ## single combined TSV with subfamily, family, class columns
-        ## plus one count column per sample. SQuIRE has older Python and
-        ## STAR pins; if it fails to install on the target machine,
-        ## drop 'squire' from external_tools in the config.
-        squire Count \
-            --map_folder {params.outdir}/maps \
-            --output_folder {params.outdir} \
-            --read_length 50 \
-            --pthreads {threads} \
-            --gtf {input.repeats_gtf} \
+        squire Fetch \
+            -b {params.build} \
+            -f -c -r -k \
+            -p {threads} \
+            -o {params.outdir} \
             2> {log}
-        python {params.squire_combine_script} \
-            --indir {params.outdir} \
-            --output {output.counts} \
-            2>> {log}
+        touch {output.marker}
         """
+
+
+rule run_squire_clean:
+    """Process the fetched RepeatMasker file into per-subfamily BED
+    files keyed on subfamily:family:class. One-shot per build."""
+    conda: op.join(workflow.basedir, 'envs', 'squire.yaml')
+    input:
+        fetch_marker = op.join(_squire_fetch_dir, '.done'),
+    output:
+        marker = op.join(_squire_clean_dir, '.done'),
+    params:
+        fetch_dir = _squire_fetch_dir,
+        outdir = _squire_clean_dir,
+        build = config.get('reference', {}).get('assembly', 'hg38'),
+    log:
+        op.join(config['base'], 'logs', 'squire_clean.log'),
+    benchmark:
+        op.join(config['base'], 'benchmarks', 'squire_clean.txt'),
+    shell:
+        r"""
+        mkdir -p {params.outdir}
+        squire Clean \
+            -b {params.build} \
+            -i {params.fetch_dir} \
+            -o {params.outdir} \
+            2> {log}
+        if [ -z "$(ls -A {params.outdir} 2>/dev/null)" ]; then
+            echo "squire Clean produced no output in {params.outdir}; check {log}" >&2
+            exit 2
+        fi
+        ## Strip 'chr' prefix from BEDs so they match the bare
+        ## chromosome names used by the rest of the pipeline (Ensembl).
+        find {params.outdir} -name '*.bed' -type f \
+            -exec sed -i 's/^chr//' {{}} +
+        touch {output.marker}
+        """
+
+
+rule run_squire_count:
+    """Per-sample SQuIRE Count against the per-cell BAM produced by
+    split_smartseq2_per_cell_bams."""
+    conda: op.join(workflow.basedir, 'envs', 'squire.yaml')
+    input:
+        bam = op.join(_per_cell_bam_dir, '{sample}.bam'),
+        bai = op.join(_per_cell_bam_dir, '{sample}.bam.bai'),
+        fetch_marker = op.join(_squire_fetch_dir, '.done'),
+        clean_marker = op.join(_squire_clean_dir, '.done'),
+    output:
+        per_sample = op.join(_squire_count_dir, '{sample}',
+                             'squire_count_{sample}.txt'),
+    params:
+        map_folder = _per_cell_bam_dir,
+        fetch_dir = _squire_fetch_dir,
+        clean_dir = _squire_clean_dir,
+        out_folder = op.join(_squire_count_dir, '{sample}'),
+        build = config.get('reference', {}).get('assembly', 'hg38'),
+        read_length = config.get('simulation', {}).get('read_length', 90),
+    wildcard_constraints:
+        sample = '|'.join(_ext_samples) if _ext_samples else 'NEVER_MATCH',
+    log:
+        op.join(config['base'], 'logs', 'squire_count_{sample}.log'),
+    benchmark:
+        op.join(config['base'], 'benchmarks', 'squire_count_{sample}.txt'),
+    threads: 4
+    resources:
+        mem_mb = config['resources']['max_mem_mb'],
+    shell:
+        r"""
+        mkdir -p {params.out_folder}
+        squire Count \
+            -m {params.map_folder} \
+            -c {params.clean_dir} \
+            -f {params.fetch_dir} \
+            -o {params.out_folder} \
+            -r {params.read_length} \
+            -n {wildcards.sample} \
+            -b {params.build} \
+            -p {threads} \
+            -s 0 \
+            2> {log}
+        """
+
+
+rule combine_squire_counts:
+    """Stage all per-sample count files into one directory and merge
+    with squire_combine_counts.py, producing the single TSV consumed by
+    harmonize_external_counts.py --tool squire."""
+    input:
+        per_sample = expand(
+            op.join(_squire_count_dir, '{sample}',
+                    'squire_count_{sample}.txt'),
+            sample=_ext_samples),
+    output:
+        counts = op.join(_squire_raw_dir, 'squire_counts.tsv'),
+    params:
+        staging = op.join(_squire_raw_dir, 'staging'),
+        combine_script = op.join(workflow.basedir, 'scripts',
+                                 'squire_combine_counts.py'),
+    log:
+        op.join(config['base'], 'logs', 'squire_combine.log'),
+    shell:
+        r"""
+        mkdir -p {params.staging}
+        rm -f {params.staging}/squire_count_*.txt
+        for f in {input.per_sample}; do
+            ln -sf $(realpath $f) {params.staging}/$(basename $f)
+        done
+        python {params.combine_script} \
+            --indir {params.staging} \
+            --output {output.counts} \
+            2> {log}
+        """
+
+
+rule aggregate_squire_benchmark:
+    """Sum per-sample squire Count wall times; max of per-sample RSS.
+    Produces benchmarks/squire.txt for score_external_benchmark."""
+    input:
+        per_sample = expand(
+            op.join(config['base'], 'benchmarks',
+                    'squire_count_{sample}.txt'),
+            sample=_ext_samples),
+    output:
+        merged = op.join(config['base'], 'benchmarks', 'squire.txt'),
+    run:
+        import csv
+        total_s = 0.0
+        max_rss = 0.0
+        fieldnames = None
+        for p in input.per_sample:
+            with open(p) as fh:
+                reader = csv.DictReader(fh, delimiter='\t')
+                fieldnames = fieldnames or reader.fieldnames
+                for row in reader:
+                    try:
+                        total_s += float(row.get('s') or 0)
+                    except ValueError:
+                        pass
+                    try:
+                        max_rss = max(max_rss, float(row.get('max_rss') or 0))
+                    except ValueError:
+                        pass
+        with open(output.merged, 'w') as fh:
+            fh.write('\t'.join(fieldnames) + '\n')
+            row = {c: '' for c in fieldnames}
+            row['s'] = f'{total_s:.4f}'
+            row['max_rss'] = f'{max_rss:.2f}'
+            fh.write('\t'.join(row[c] for c in fieldnames) + '\n')
 
 
 # ----------------------------------------------------------------------
@@ -290,11 +567,21 @@ def _tool_raw_input(wildcards):
     raise ValueError(f'unknown external tool {wildcards.tool!r}')
 
 
+def _harmonize_extra_inputs(wildcards):
+    """scTE on Chromium needs the barcode->cell_id map to translate the
+    h5ad obs_names. SmartSeq2 and TEtranscripts have no barcode layer."""
+    if wildcards.tool == 'scte' and _sim_technology == 'chromium':
+        return [op.join(config['base'], 'simulations', _sim_technology,
+                        'barcode_to_cell_id.tsv')]
+    return []
+
+
 rule harmonize_external:
     conda: op.join(workflow.basedir, 'envs', 'evaluation.yaml')
     input:
         raw = _tool_raw_input,
         locus_map = _locus_map,
+        extra = _harmonize_extra_inputs,
     output:
         counts = op.join(_ext_outdir, '{tool}',
                          '{tool}_repeats_{granularity}_unique.tsv'),
@@ -308,6 +595,10 @@ rule harmonize_external:
         op.join(config['base'], 'logs', 'harmonize_{tool}_{granularity}.log'),
     shell:
         r"""
+        EXTRA=""
+        if [ -n "{input.extra}" ]; then
+            EXTRA="--barcode-map {input.extra}"
+        fi
         python {_harmonize_script} \
             --tool {wildcards.tool} \
             --input {input.raw} \
@@ -315,6 +606,7 @@ rule harmonize_external:
             --samples '{params.samples}' \
             --granularity {wildcards.granularity} \
             --min-overlap-fraction {params.min_overlap} \
+            $EXTRA \
             --output {output.counts} \
             2> {log}
         """
@@ -324,6 +616,14 @@ rule harmonize_external:
 # Score harmonised counts against ground truth (reuse evaluate.py)
 # ----------------------------------------------------------------------
 
+def _score_benchmark_input(wildcards):
+    """tetranscripts: per-tool aggregated benchmark from
+    aggregate_tetranscripts_benchmark. scte and squire: per-tool file
+    written by the run rule. Declaring this as an input makes the
+    aggregator run before scoring."""
+    return op.join(config['base'], 'benchmarks', f'{wildcards.tool}.txt')
+
+
 rule score_external_benchmark:
     conda: op.join(workflow.basedir, 'envs', 'evaluation.yaml')
     input:
@@ -331,6 +631,7 @@ rule score_external_benchmark:
         counts = op.join(_ext_outdir, '{tool}',
                          '{tool}_repeats_{granularity}_unique.tsv'),
         locus_map = _locus_map,
+        benchmark = _score_benchmark_input,
     output:
         global_metrics = op.join(_ext_outdir, '{tool}',
                                  '{tool}_repeats_{granularity}_unique_global_metrics.tsv'),
@@ -340,8 +641,6 @@ rule score_external_benchmark:
                              '{tool}_repeats_{granularity}_unique_per_family_metrics.tsv'),
     params:
         mutation_rate = _sim_mutation_rate,
-        benchmark_file = lambda wc: op.join(config['base'], 'benchmarks',
-                                            f'{wc.tool}.txt'),
         output_prefix = op.join(_ext_outdir, '{tool}',
                                 '{tool}_repeats_{granularity}_unique'),
     wildcard_constraints:
@@ -359,7 +658,7 @@ rule score_external_benchmark:
             --granularity {wildcards.granularity} \
             --feature-set repeats \
             --locus-map {input.locus_map} \
-            --benchmark {params.benchmark_file} \
+            --benchmark {input.benchmark} \
             --output-prefix {params.output_prefix} \
             --mutation-rate {params.mutation_rate} \
             2> {log}

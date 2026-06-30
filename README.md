@@ -217,14 +217,14 @@ Phase 3 (planned): per-perturbation pseudobulk DE under `~ W + group` with RUVg,
 
 ## External tool benchmark
 
-A separate config flag `external_benchmark: true` activates a comparison of REclaim against published repeat-quantification tools (TEtranscripts, scTE, optionally SQuIRE) on the same simulation BAMs and ground truth, scored by the same `evaluate.py`. See [docs/external_tool_benchmark.md](docs/external_tool_benchmark.md) for tool choices, version pins, and harmonisation contract.
+A separate config flag `external_benchmark: true` activates a comparison of REclaim against published repeat-quantification tools on the same simulation BAMs and ground truth, scored by the same `evaluate.py`. SmartSeq2 runs TEtranscripts and SQuIRE (both bulk-style, per-cell BAM treated as a sample). Chromium runs scTE (single-cell). See [docs/external_tool_benchmark.md](docs/external_tool_benchmark.md) for tool choices, version pins, and harmonisation contract.
 
 ```
-make external_benchmark_smartseq2 CORES=N    # TEtranscripts on SmartSeq2 simulation
-make external_benchmark_chromium  CORES=N    # scTE on Chromium simulation
+make external_benchmark_smartseq2 CORES=N    # TEtranscripts and SQuIRE on the SmartSeq2 simulation
+make external_benchmark_chromium  CORES=N    # scTE on the Chromium simulation
 ```
 
-Outputs land at `results/{simulation_*}/external_benchmark/external_benchmark_report.html` alongside the per-tool harmonised counts and accuracy tables.
+Outputs land at `results/{simulation_*}/external_benchmark/external_benchmark_report.html` alongside the per-tool harmonised counts and accuracy tables. The report compares REclaim quantifiers and the external tools side by side at every granularity, with a coverage table that marks each cell as native or rolled up.
 
 ## Implementation notes
 

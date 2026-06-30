@@ -1,0 +1,284 @@
+---
+title: "Repetitive element expression in neurodegeneration essential-gene knockdowns (Replogle 2022)"
+author: "Izaskun Mallona"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: flatly
+    toc: true
+    toc_float: true
+    code_folding: hide
+params:
+  ruv_csv_dir: "."                 # dir holding ruv_de_long.csv, validation_te_fraction.csv (the RUV report csv/ outdir)
+  cells_to_perturbation: "."       # maps gene_transcript to gene symbol
+  neuro_categories_path: "neuro_gene_categories.tsv"
+  figures_outdir: ""               # optional: if set, each figure is also written as a vector pdf here
+  mode_use: "multi"                # starsolo multimapper mode to display (multi recommended for repeats)
+  fdr_threshold: 0.05
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.align = "center", dpi = 300)
+suppressPackageStartupMessages({
+  library(readr); library(dplyr); library(tidyr)
+  library(ggplot2); library(ggrepel); library(knitr)
+})
+
+# Colour axes from neuro_gene_categories.tsv: mechanism and disease_group.
+mechanism_palette <- c(
+  `DNA repair`            = "firebrick",
+  `RNA metabolism`        = "steelblue",
+  `Mitochondrial & other` = "#7D3C98")
+disease_palette <- c(
+  `DNA-repair syndromes (XP / AGS)`     = "#D55E00",
+  `Cerebellar & spinocerebellar ataxia` = "#0072B2",
+  `Pontocerebellar hypoplasia`          = "#009E73",
+  `ALS / FTD`                           = "#CC79A7",
+  `Neurodevelopmental & neuromuscular`  = "#E69F00")
+
+theme_paper <- function(base_size = 13) {
+  theme_classic(base_size = base_size) +
+    theme(panel.grid = element_blank(),
+          strip.background = element_blank(),
+          strip.text = element_text(face = "bold", size = base_size),
+          legend.position = "bottom",
+          legend.title = element_text(size = base_size - 1),
+          legend.text = element_text(size = base_size - 1))
+}
+
+read_csv_or_empty <- function(path) {
+  if (!is.null(path) && nzchar(path) && file.exists(path)) {
+    suppressMessages(read_csv(path, show_col_types = FALSE))
+  } else {
+    tibble()
+  }
+}
+
+mode_use <- params$mode_use
+fdr_threshold <- as.numeric(params$fdr_threshold)
+figures_outdir <- params$figures_outdir
+if (nzchar(figures_outdir)) dir.create(figures_outdir, showWarnings = FALSE,
+                                       recursive = TRUE)
+
+# Save a figure as a vector pdf for direct paper/grant reuse, if an outdir is set.
+save_fig <- function(p, name, width, height) {
+  if (nzchar(figures_outdir)) {
+    ggsave(file.path(figures_outdir, paste0(name, ".pdf")), p,
+           width = width, height = height, device = cairo_pdf)
+  }
+  invisible(p)
+}
+
+de_long <- read_csv_or_empty(file.path(params$ruv_csv_dir, "ruv_de_long.csv"))
+validation <- read_csv_or_empty(file.path(params$ruv_csv_dir,
+                                          "validation_te_fraction.csv"))
+
+neuro <- if (file.exists(params$neuro_categories_path)) {
+  suppressMessages(read_tsv(params$neuro_categories_path, show_col_types = FALSE))
+} else {
+  tibble()
+}
+
+cells <- if (file.exists(params$cells_to_perturbation)) {
+  suppressMessages(read_tsv(params$cells_to_perturbation, show_col_types = FALSE))
+} else {
+  tibble()
+}
+
+# gene_transcript -> gene symbol, then symbol -> neuro categories.
+gt_to_gene <- if (nrow(cells) > 0) {
+  cells |> distinct(gene_transcript, gene)
+} else {
+  tibble()
+}
+
+neuro <- if (nrow(neuro) > 0) {
+  neuro |>
+    mutate(mechanism = factor(mechanism, levels = names(mechanism_palette)),
+           disease_group = factor(disease_group, levels = names(disease_palette)))
+} else {
+  neuro
+}
+
+# Annotate the DE table with neuro categories (only neuro perturbations kept).
+neuro_de <- if (nrow(de_long) > 0 && nrow(gt_to_gene) > 0 && nrow(neuro) > 0) {
+  de_long |>
+    inner_join(gt_to_gene, by = "gene_transcript") |>
+    inner_join(neuro, by = "gene") |>
+    filter(mode == mode_use)
+} else {
+  tibble()
+}
+
+have_de <- nrow(neuro_de) > 0
+```
+
+# Coverage
+
+Repeat expression for the neurodegeneration genes, read from the RUVg differential-expression outputs and grouped by mechanism and disease. This does not recompute the DE; set `ruv_csv_dir` to the RUV report `csv/` directory.
+
+```{r coverage}
+cat("ruv_de_long rows:        ", nrow(de_long), "\n")
+cat("neuro genes annotated:   ", nrow(neuro), "\n")
+if (have_de) {
+  covered <- neuro_de |> distinct(gene) |> arrange(gene) |> pull(gene)
+  cat("neuro genes with repeat DE (mode =", mode_use, "):",
+      length(covered), "\n")
+  cat(paste(covered, collapse = ", "), "\n")
+} else {
+  cat("\nNo neuro-gene repeat DE found. Either the RUV report has not been run,",
+      "or it was not run on a perturbation set that includes the neuro genes.",
+      "\nRun the RUV report with a neuro selected_perturbations.tsv, then set",
+      "ruv_csv_dir to its csv/ output directory.\n")
+}
+```
+
+# Total repeat load per knockdown
+
+```{r te-load, eval = nrow(validation) > 0 && nrow(neuro) > 0, fig.width = 8, fig.height = 6}
+val <- validation |> filter(mode == mode_use)
+ctrl_frac <- val |> filter(pert_id == "control_pool") |>
+  pull(reclaim_te_total_fraction)
+ctrl_frac <- if (length(ctrl_frac)) ctrl_frac[1] else NA_real_
+
+val_neuro <- val |>
+  inner_join(gt_to_gene, by = c("pert_id" = "gene_transcript")) |>
+  inner_join(neuro, by = "gene") |>
+  mutate(log2_vs_ctrl = if (!is.na(ctrl_frac))
+           log2(reclaim_te_total_fraction / ctrl_frac) else NA_real_,
+         gene_lab = paste0(gene, " (", disease_short, ")"),
+         gene_lab = reorder(gene_lab, log2_vs_ctrl))
+
+if (nrow(val_neuro) > 0 && !all(is.na(val_neuro$log2_vs_ctrl))) {
+  p1 <- ggplot(val_neuro, aes(x = log2_vs_ctrl, y = gene_lab,
+                              colour = disease_group)) +
+    geom_vline(xintercept = 0, linetype = "dashed", colour = "grey40") +
+    geom_point(size = 3) +
+    scale_colour_manual(values = disease_palette, name = NULL) +
+    guides(colour = guide_legend(ncol = 1)) +
+    labs(x = "log2 total TE fraction vs control pool", y = NULL,
+         title = "Total TE fraction vs control pool") +
+    theme_paper()
+  save_fig(p1, "neuro_repeats_te_load", 8, 6)
+  print(p1)
+} else {
+  cat("validation table present but no neuro perturbations / control pool found.\n")
+}
+```
+
+# Repeat classes by gene
+
+```{r class-heatmap, eval = have_de, fig.width = 9, fig.height = 7}
+class_df <- neuro_de |> filter(granularity == "class_id")
+if (nrow(class_df) > 0) {
+  class_order <- c("LINE", "SINE", "LTR", "Retroposon", "DNA",
+                   "Satellite", "Simple_repeat", "Low_complexity",
+                   "snRNA", "scRNA", "srpRNA", "tRNA", "rRNA")
+  present_classes <- unique(class_df$feature_id)
+  lvls <- c(intersect(class_order, present_classes),
+            setdiff(present_classes, class_order))
+  class_df <- class_df |>
+    mutate(feature_id = factor(feature_id, levels = lvls),
+           gene_lab = paste0(gene, " (", disease_short, ")"))
+  lim <- max(abs(class_df$logFC), na.rm = TRUE)
+  if (!is.finite(lim) || lim == 0) lim <- 1
+  p2 <- ggplot(class_df, aes(x = feature_id, y = gene_lab, fill = logFC)) +
+    geom_tile(colour = "grey90") +
+    geom_point(data = class_df |> filter(FDR < fdr_threshold),
+               aes(x = feature_id, y = gene_lab), shape = 8, size = 1.3,
+               inherit.aes = FALSE) +
+    facet_grid(mechanism ~ ., scales = "free_y", space = "free_y") +
+    scale_fill_gradient2(low = "steelblue", mid = "white", high = "firebrick",
+                         midpoint = 0, limits = c(-lim, lim),
+                         name = "repeat logFC vs control") +
+    labs(x = "repeat class", y = NULL,
+         title = "Repeat class log fold change vs control",
+         subtitle = sprintf("asterisk: FDR < %.2g; mode = %s",
+                            fdr_threshold, mode_use)) +
+    theme_paper(base_size = 12) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          strip.text.y = element_text(angle = 0))
+  save_fig(p2, "neuro_repeats_class_heatmap", 9, 7)
+  print(p2)
+} else {
+  cat("no class_id-granularity rows for neuro perturbations.\n")
+}
+```
+
+# Repeat changes by disease group
+
+```{r class-by-disease, eval = have_de, fig.width = 9, fig.height = 6}
+fam_df <- neuro_de |> filter(granularity == "family_id")
+src_df <- if (nrow(fam_df) > 0) fam_df else neuro_de |> filter(granularity == "class_id")
+if (nrow(src_df) > 0) {
+  has_polya <- "polya" %in% names(src_df) && any(!is.na(src_df$polya))
+  p3 <- ggplot(src_df, aes(x = disease_group, y = logFC, colour = disease_group)) +
+    geom_hline(yintercept = 0, linetype = "dashed", colour = "grey40") +
+    geom_boxplot(outlier.shape = NA, fill = NA, width = 0.6) +
+    geom_jitter(width = 0.15, height = 0, size = 0.8, alpha = 0.4) +
+    scale_colour_manual(values = disease_palette, guide = "none") +
+    scale_x_discrete(labels = scales::label_wrap_gen(16)) +
+    labs(x = NULL, y = "repeat logFC vs control",
+         title = "Repeat log fold change by disease group") +
+    theme_paper(base_size = 12) +
+    theme(axis.text.x = element_text(size = 10))
+  if (has_polya) p3 <- p3 + facet_wrap(~ polya, scales = "free_y")
+  save_fig(p3, "neuro_repeats_class_by_disease", 9, 6)
+  print(p3)
+} else {
+  cat("no family/class rows for neuro perturbations.\n")
+}
+```
+
+# Repeat families in the strongest knockdowns
+
+```{r family-volcano, eval = have_de, fig.width = 9, fig.height = 6}
+fam_df <- neuro_de |> filter(granularity == "family_id")
+if (nrow(fam_df) > 0) {
+  standout <- fam_df |>
+    group_by(gene) |>
+    summarise(maxabs = max(abs(logFC), na.rm = TRUE), .groups = "drop") |>
+    arrange(desc(maxabs)) |>
+    slice_head(n = 4) |>
+    pull(gene)
+  v_df <- fam_df |>
+    filter(gene %in% standout) |>
+    mutate(neglogfdr = -log10(pmax(FDR, 1e-300)),
+           class_id = ifelse(is.na(class_id), "other", class_id))
+  labels <- v_df |> group_by(gene) |> arrange(desc(abs(logFC))) |>
+    slice_head(n = 6) |> ungroup()
+  p4 <- ggplot(v_df, aes(x = logFC, y = neglogfdr, colour = class_id)) +
+    geom_vline(xintercept = 0, linetype = "dashed", colour = "grey60") +
+    geom_hline(yintercept = -log10(fdr_threshold), linetype = "dotted",
+               colour = "grey60") +
+    geom_point(alpha = 0.6, size = 1.4) +
+    ggrepel::geom_text_repel(data = labels, aes(label = feature_id),
+                             size = 3, max.overlaps = 30, show.legend = FALSE) +
+    facet_wrap(~ gene, scales = "free") +
+    labs(x = "repeat family logFC vs control", y = "-log10(FDR)",
+         colour = "repeat class",
+         title = "Repeat families in the strongest knockdowns") +
+    theme_paper(base_size = 12)
+  save_fig(p4, "neuro_repeats_family_volcano", 9, 6)
+  print(p4)
+} else {
+  cat("no family_id-granularity rows for neuro perturbations.\n")
+}
+```
+
+# Summary table
+
+```{r table, eval = have_de}
+tab <- neuro_de |>
+  filter(granularity == "class_id") |>
+  group_by(gene, mechanism, disease_group) |>
+  summarise(n_classes = dplyr::n(),
+            max_class_logFC = max(logFC, na.rm = TRUE),
+            min_class_logFC = min(logFC, na.rm = TRUE),
+            n_sig = sum(FDR < fdr_threshold, na.rm = TRUE),
+            .groups = "drop") |>
+  arrange(disease_group, desc(max_class_logFC))
+kable(tab, digits = 3,
+      caption = "Per neuro gene: class-level repeat logFC range and significant classes.")
+```

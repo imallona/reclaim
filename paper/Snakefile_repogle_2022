@@ -281,3 +281,235 @@ rule render_repogle_2022_perturbseq_report:
             )
         )" 2> {log}
         """
+
+
+# Neuro essential-gene panel: a second perturbation set selected by gene
+# symbol, run through the same RUVg DE, then browsed. Outputs use a _neuro
+# suffix. Build after the alignment outputs exist:
+#   snakemake -s Snakefile_repogle_2022 --use-conda --cores 4 \
+#       --configfile configs/repogle_2022.yaml neuro
+
+_neuro_gene_list = op.join(workflow.basedir, "scripts",
+                           config.get('neuro', {}).get('gene_list',
+                                                       "neuro_gene_categories.tsv"))
+_neuro_rds = op.join(_report, "ruv_rds_neuro")
+_neuro_csv = op.join(_neuro_rds, "csv")
+
+
+rule neuro:
+    input:
+        op.join(_report, "neuro_repeats_browse_report.html"),
+
+
+rule select_repogle_2022_neuro_cells:
+    conda:
+        "envs/repogle_metadata.yaml"
+    input:
+        manifest = op.join(_dl, _files['manifest_kd6']['name']),
+        bulk = op.join(_dl, _files['bulk_h5ad']['name']),
+        singlecell = op.join(_dl, _files['singlecell_h5ad']['name']),
+        script = op.join(workflow.basedir, "scripts",
+                         "select_repogle_2022_cells.py"),
+        gene_list = _neuro_gene_list,
+    output:
+        perturbations = op.join(_data, "selected_perturbations_neuro.tsv"),
+        cells = op.join(_data, "cells_to_perturbation_neuro.tsv"),
+        libraries = op.join(_data, "selected_libraries_neuro.tsv"),
+    params:
+        outdir = _data,
+        n_controls = config['selection']['n_controls'],
+        min_cells = config['selection']['min_cells_per_perturbation'],
+        seed = config['selection']['seed'],
+        gemgroups = ",".join(str(g) for g in config.get('gemgroup_subset', [])),
+    log:
+        op.join(_out, "logs", "select_cells_neuro.log"),
+    resources:
+        mem_mb = config.get("resources", {}).get("select_mem_mb", 8000),
+    shell:
+        """
+        mkdir -p {params.outdir} $(dirname {log})
+        python {input.script} \\
+            --bulk {input.bulk} \\
+            --singlecell {input.singlecell} \\
+            --manifest {input.manifest} \\
+            --gene-list {input.gene_list} \\
+            --n-controls {params.n_controls} \\
+            --min-cells {params.min_cells} \\
+            --seed {params.seed} \\
+            --gemgroups "{params.gemgroups}" \\
+            --out-perturbations {output.perturbations} \\
+            --out-cells {output.cells} \\
+            --out-libraries {output.libraries} \\
+            2> {log}
+        """
+
+
+rule render_repogle_2022_neuro_perturbseq_report:
+    conda:
+        "envs/ruvseq.yaml"
+    input:
+        rmd = op.join(workflow.basedir, "scripts",
+                      "ruv_repogle_2022_perturbseq_report.Rmd"),
+        cells = op.join(_data, "cells_to_perturbation_neuro.tsv"),
+        perturbations = op.join(_data, "selected_perturbations_neuro.tsv"),
+        alignment_qc = op.join(_report, "alignment_qc_per_library.tsv"),
+    output:
+        html = op.join(_report,
+                       "ruv_repogle_2022_neuro_perturbseq_report.html"),
+        rds_dir = directory(_neuro_rds),
+    params:
+        rmd = op.abspath(op.join(workflow.basedir, "scripts",
+                                 "ruv_repogle_2022_perturbseq_report.Rmd")),
+        abs_html = op.abspath(op.join(
+            _report, "ruv_repogle_2022_neuro_perturbseq_report.html")),
+        outdir = op.abspath(_neuro_rds),
+        cells = op.abspath(op.join(_data, "cells_to_perturbation_neuro.tsv")),
+        perturbations = op.abspath(op.join(_data,
+                                           "selected_perturbations_neuro.tsv")),
+        alignment_qc = op.abspath(op.join(_report,
+                                          "alignment_qc_per_library.tsv")),
+        starsolo_base = op.abspath(config['phase3']['starsolo_base']),
+        starsolo_tagcount_base = (
+            op.abspath(config['phase3']['starsolo_tagcount_base'])
+            if 'starsolo_tagcount_base' in config.get('phase3', {}) else ""),
+        indices_base = op.abspath(config['phase3']['indices_base']),
+        feature_sets = config['phase3']['feature_sets'],
+        starsolo_modes = config['phase3']['starsolo_modes'],
+        n_controls = int(config['phase3']['n_controls']),
+        k_selected = int(config['phase3']['k_selected']),
+        min_cells_per_col = int(config['phase3']['min_cells_per_perturbation_col']),
+    log:
+        op.join(_out, "logs", "render_neuro_perturbseq_report.log"),
+    resources:
+        mem_mb = config.get("resources", {}).get("ruv_mem_mb", 32000),
+    shell:
+        """
+        mkdir -p {params.outdir} $(dirname {log})
+        Rscript -e "rmarkdown::render(
+            '{params.rmd}',
+            output_file = '{params.abs_html}',
+            knit_root_dir = getwd(),
+            params = list(
+                cells_to_perturbation = '{params.cells}',
+                selected_perturbations = '{params.perturbations}',
+                alignment_qc = '{params.alignment_qc}',
+                starsolo_base = '{params.starsolo_base}',
+                starsolo_tagcount_base = '{params.starsolo_tagcount_base}',
+                indices_base = '{params.indices_base}',
+                report_outdir = '{params.outdir}',
+                feature_sets = '{params.feature_sets}',
+                starsolo_modes = '{params.starsolo_modes}',
+                n_controls = {params.n_controls},
+                k_selected = {params.k_selected},
+                min_cells_per_col = {params.min_cells_per_col}
+            )
+        )" 2> {log}
+        """
+
+
+rule render_neuro_repeats_browse_report:
+    conda:
+        "envs/neuro_repeats_browse.yaml"
+    input:
+        rmd = op.join(workflow.basedir, "scripts",
+                      "neuro_repeats_browse_report.Rmd"),
+        de_long = op.join(_neuro_csv, "ruv_de_long.csv"),
+        validation = op.join(_neuro_csv, "validation_te_fraction.csv"),
+        cells = op.join(_data, "cells_to_perturbation_neuro.tsv"),
+        categories = _neuro_gene_list,
+    output:
+        html = op.join(_report, "neuro_repeats_browse_report.html"),
+        figures = directory(op.join(_report, "neuro_repeats_figures")),
+    params:
+        rmd = op.abspath(op.join(workflow.basedir, "scripts",
+                                 "neuro_repeats_browse_report.Rmd")),
+        abs_html = op.abspath(op.join(_report,
+                                      "neuro_repeats_browse_report.html")),
+        ruv_csv_dir = op.abspath(_neuro_csv),
+        cells = op.abspath(op.join(_data, "cells_to_perturbation_neuro.tsv")),
+        categories = op.abspath(_neuro_gene_list),
+        figures_outdir = op.abspath(op.join(_report, "neuro_repeats_figures")),
+        mode_use = config.get('neuro', {}).get('mode_use', "multi"),
+        fdr_threshold = config.get('neuro', {}).get('fdr_threshold', 0.05),
+    log:
+        op.join(_out, "logs", "render_neuro_repeats_browse_report.log"),
+    resources:
+        mem_mb = config.get("resources", {}).get("browse_mem_mb", 8000),
+    shell:
+        """
+        mkdir -p {params.figures_outdir} $(dirname {log})
+        Rscript -e "rmarkdown::render(
+            '{params.rmd}',
+            output_file = '{params.abs_html}',
+            knit_root_dir = getwd(),
+            params = list(
+                ruv_csv_dir = '{params.ruv_csv_dir}',
+                cells_to_perturbation = '{params.cells}',
+                neuro_categories_path = '{params.categories}',
+                figures_outdir = '{params.figures_outdir}',
+                mode_use = '{params.mode_use}',
+                fdr_threshold = {params.fdr_threshold}
+            )
+        )" 2> {log}
+        """
+
+
+# Group perturbations by functional complex and test if the repeat response
+# is category-specific. Reads the ruv report's ruv_de_long.csv (ancient, so
+# this never re-knits that report). Run after the ruv report exists:
+#   snakemake -s Snakefile_repogle_2022 --use-conda --cores 4 \
+#       --configfile configs/repogle_2022.yaml category_figures
+
+
+rule category_figures:
+    input:
+        op.join(_report, "repogle_2022_perturbation_category_figures.html"),
+
+
+rule render_repogle_2022_category_figures:
+    conda:
+        "envs/figures_repogle.yaml"
+    input:
+        rmd = op.join(workflow.basedir, "scripts",
+                      "repogle_2022_perturbation_category_figures.Rmd"),
+        de_long = ancient(op.join(_report, "ruv_rds", "csv", "ruv_de_long.csv")),
+        categories = op.join(workflow.basedir, "scripts",
+                             "repogle_2022_perturbation_categories.tsv"),
+    output:
+        html = op.join(_report,
+                       "repogle_2022_perturbation_category_figures.html"),
+        rds_dir = directory(op.join(_report, "category_figures")),
+    params:
+        rmd = op.abspath(op.join(workflow.basedir, "scripts",
+                                 "repogle_2022_perturbation_category_figures.Rmd")),
+        abs_html = op.abspath(op.join(
+            _report, "repogle_2022_perturbation_category_figures.html")),
+        outdir = op.abspath(op.join(_report, "category_figures")),
+        de_long = op.abspath(op.join(_report, "ruv_rds", "csv",
+                                     "ruv_de_long.csv")),
+        categories = op.abspath(op.join(workflow.basedir, "scripts",
+                                        "repogle_2022_perturbation_categories.tsv")),
+        focus_mode = config['phase3'].get('focus_mode', "unique"),
+        modes = config['phase3']['starsolo_modes'],
+        feature_sets = "genic_repeats intergenic_repeats",
+    log:
+        op.join(_out, "logs", "render_category_figures.log"),
+    resources:
+        mem_mb = config.get("resources", {}).get("ruv_mem_mb", 16000),
+    shell:
+        """
+        mkdir -p {params.outdir} $(dirname {log})
+        Rscript -e "rmarkdown::render(
+            '{params.rmd}',
+            output_file = '{params.abs_html}',
+            knit_root_dir = getwd(),
+            params = list(
+                de_long = '{params.de_long}',
+                category_map = '{params.categories}',
+                report_outdir = '{params.outdir}',
+                focus_mode = '{params.focus_mode}',
+                modes = '{params.modes}',
+                feature_sets = '{params.feature_sets}'
+            )
+        )" 2> {log}
+        """
