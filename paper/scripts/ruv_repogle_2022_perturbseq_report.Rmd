@@ -480,7 +480,7 @@ for (mode_i in starsolo_modes) {
       filter(mode == mode_i, feature_set == fs_i, granularity == "family_id")
     if (nrow(df_family) == 0) next
     cat(sprintf("\n### family_id distribution by polyA-competence: %s / %s\n\n",
-                mode, fs))
+                mode_i, fs_i))
     print(class_logfc_box(df_family, facet_col = "polya",
                           title_tag = paste(mode_i, fs_i, "family_id logFC")))
   }
@@ -583,7 +583,7 @@ if (nzchar(tagcount_starsolo_base) && dir.exists(tagcount_starsolo_base)) {
     parts <- list()
     for (gg in sort(unique(cells$gem_group))) {
       library_id <- paste0("KD6_", gg, "_essential")
-      m <- load_starsolo_matrix_at(tagcount_starsolo_base, library_id,
+      m <- load_starsolo_matrix_at(if (feature_set == "genes") starsolo_base else tagcount_starsolo_base, library_id,
                                     mode, feature_set)
       if (is.null(m)) next
       lib_cells <- cells[cells$gem_group == gg, ]
